@@ -37,6 +37,23 @@ type
      prev*: Token
      pos*: int32
 
+  ## Used to save the scanner state for speculative parsing.
+  ScanState* = object
+     c: Token
+     p: Token
+     pos: int32
+
+## Saves the current position as a restart point.
+## This state can be restored with a subsequent rewind()
+## call.
+proc restartPoint*(s: Scanner) : ScanState = 
+   return ScanState(c: s.cur, p: s.prev, pos: s.pos)
+
+proc rewind*(s:Scanner, ss: ScanState) = 
+   s.cur = ss.c
+   s.prev = ss.p
+   s.pos = ss.pos
+
 let WS = [' ', '\t', '\r', '\n']
 
 #TODO the code for lexing reals should probably be broken out so we
@@ -196,7 +213,11 @@ proc next*(s: Scanner) : TokenKind =
       let c = s.txt[i]
 
       if c == '.':
-        lexReal(i+1)
+        # Check for .. operator right against a number
+        if i+1 < len(s.txt) and s.txt[i+1] == '.':
+           tok(ConstInt, i - s.pos)
+        else:
+           lexReal(i+1)
         return
       elif c == 'H':
         tok(ConstHex, i + 1 - s.pos)

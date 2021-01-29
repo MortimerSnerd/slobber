@@ -1,5 +1,5 @@
 import 
-   ast, scanner, strformat
+   ast, scanner, streams, strformat
 
 #TODO the error handling is half assed in here.
 
@@ -22,7 +22,7 @@ proc err(s: ParseState, msg: string) =
    #TODO how do we report failures?
    assert false, &"@{s.scan.pos}: {msg}"
 
-proc acceptOrFail(ps: ParseState, tk: TokenKind) : bool = 
+proc mustAccept(ps: ParseState, tk: TokenKind) : bool = 
    if accept(ps, tk):
       return true
    else:
@@ -84,23 +84,27 @@ proc parseExpression(ps: ParseState) : ASTNode =
    return e
 
 proc parseIdentDef(ps: ParseState) : IdentDef = 
-   discard acceptOrFail(ps, Id)
-   let rv = IdentDef(id: ps.scan.prev)
+   discard mustAccept(ps, Id)
+   let rv = IdentDef(tok: ps.scan.prev)
 
    if accept(ps, ASTERISK):
-      rv.public = true
+      rv.isExport = true
 
    return rv
+
+proc parseIdent(ps: ParseState) : Terminal = 
+   discard mustAccept(ps, Id)
+   return Terminal(tok: ps.scan.prev)
 
 # identdef "=" ConstExpression
 proc parseConstDeclaration(ps: ParseState) : ConstDeclaration = 
    let id = parseIdentDef(ps)
-   discard acceptOrFail(ps, EQ)
+   discard mustAccept(ps, EQ)
    return ConstDeclaration(id: id, rhs: parseExpression(ps))
 
 
 proc parseSet(ps: ParseState) : SetLiteral = 
-   if acceptOrFail(ps, LBRACE):
+   if mustAccept(ps, LBRACE):
       let rv = SetLiteral(ldelim: ps.scan.prev)
 
       while curTok(ps) != RBRACE:
@@ -119,7 +123,7 @@ proc parseSet(ps: ParseState) : SetLiteral =
             err(ps, &"Was expecting expession for set value.")
             return nil
 
-      discard acceptOrFail(ps, RBRACE)
+      discard mustAccept(ps, RBRACE)
       rv.rdelim = ps.scan.prev
       return rv
    else:
@@ -131,7 +135,7 @@ proc parseQualIdent(ps: ParseState) : QualIdent =
    if curTok(ps) == Id:
       let rv = QualIdent()
 
-      while acceptOrFail(ps, Id):
+      while mustAccept(ps, Id):
          add(rv.pcs, ps.scan.prev)
          if not accept(ps, DOT):
             break
@@ -140,16 +144,16 @@ proc parseQualIdent(ps: ParseState) : QualIdent =
    else:
       return nil
 
-proc parseExpList(ps: ParseState, dest: ParentOfMany) = 
+proc parseExpList(ps: ParseState, dest: ASTBranch) = 
    add(dest.chld, parseExpression(ps))
    while accept(ps, COMMA):
       add(dest.chld, parseExpression(ps))
 
-proc parseActualParameters(ps: ParseState, dest: ParentOfMany) = 
-   discard acceptOrFail(ps, LPAREN)
+proc parseActualParameters(ps: ParseState, dest: ASTBranch) = 
+   discard mustAccept(ps, LPAREN)
    if curTok(ps) != RPAREN:
       parseExpList(ps, dest)
-   discard acceptOrFail(ps, RPAREN)
+   discard mustAccept(ps, RPAREN)
 
 proc parseFactor(ps: ParseState) : ASTNode = 
    if accept(ps, MINUS):
@@ -164,7 +168,7 @@ proc parseFactor(ps: ParseState) : ASTNode =
          let op = ps.scan.cur
          discard next(ps.scan)
          let rv = UnaryOp(op: op, rhs: parseExpression(ps))
-         discard acceptOrFail(ps, RPAREN)
+         discard mustAccept(ps, RPAREN)
          return rv
 
       of Id:
@@ -188,14 +192,14 @@ let parseConstExpression = parseExpression
 # ARRAY length {"," length} OF type
 # length = ConstExpression
 proc parseArrayType(ps: ParseState) : AstNode = 
-   discard acceptOrFail(ps, KARRAY)
+   discard mustAccept(ps, KARRAY)
    let rv = ArrayType()
 
    add(rv.chld, parseConstExpression(ps))
    while accept(ps, COMMA):
       add(rv.chld, parseConstExpression(ps))
 
-   discard acceptOrFail(ps, KOF)
+   discard mustAccept(ps, KOF)
    add(rv.chld, parseType(ps))
 
    return rv
@@ -208,31 +212,29 @@ proc parseArrayType(ps: ParseState) : AstNode =
 proc parseFieldList(ps: ParseState) : FieldList = 
    let rv = FieldList()
    
-   discard acceptOrFail(ps, Id)
-   add(rv.chld, Terminal(tok: ps.scan.prev))
+   add(rv.chld, parseIdent(ps))
    while accept(ps, COMMA):   
-      discard acceptOrFail(ps, Id)
-      add(rv.chld, Terminal(tok: ps.scan.prev))
+      add(rv.chld, parseIdent(ps))
 
-   discard acceptOrFail(ps, COLON)
+   discard mustAccept(ps, COLON)
    rv.ty = parseType(ps)
 
    return rv
 
 proc parseRecordType(ps: ParseState) : AstNode = 
-   discard acceptOrFail(ps, KRECORD)
+   discard mustAccept(ps, KRECORD)
    let rv = RecordType()
 
    if accept(ps, LPAREN):
       rv.base = parseQualident(ps)
-      discard acceptOrFail(ps, RPAREN)
+      discard mustAccept(ps, RPAREN)
 
    while curTok(ps) == Id:
       add(rv.chld, parseFieldList(ps))
       while accept(ps, SEMI):
          add(rv.chld, parseFieldList(ps))
 
-   discard acceptOrFail(ps, KEND)
+   discard mustAccept(ps, KEND)
    return rv
 
 #  {ARRAY OF} qualident
@@ -240,7 +242,7 @@ proc parseFormalType(ps: ParseState) : AstNode =
    let rv = FormalType()
 
    while accept(ps, KARRAY):
-      discard acceptOrFail(ps, KOF)
+      discard mustAccept(ps, KOF)
       inc(rv.nofArrays)
 
    rv.id = parseQualident(ps)
@@ -253,13 +255,11 @@ proc parseFPSection(ps: ParseState) : FPSection =
    if accept(ps, KVAR):
       rv.isVar = true
       
-   discard acceptOrFail(ps, Id)
-   add(rv.chld, Terminal(tok: ps.scan.prev))   
+   add(rv.chld, parseIdent(ps))   
    while accept(ps, COMMA):
-      discard acceptOrFail(ps, Id)
-      add(rv.chld, Terminal(tok: ps.scan.prev))   
+      add(rv.chld, parseIdent(ps))   
 
-   discard acceptOrFail(ps, COLON)
+   discard mustAccept(ps, COLON)
    rv.ty = parseFormalType(ps)
 
    return rv
@@ -268,7 +268,7 @@ proc parseFPSection(ps: ParseState) : FPSection =
 proc parseFormalParameters(ps: ParseState) : FormalParameters = 
    let rv = FormalParameters()
 
-   discard acceptOrFail(ps, LPAREN)
+   discard mustAccept(ps, LPAREN)
    
    if curTok(ps) != RPAREN:
       add(rv.chld, parseFPSection(ps))
@@ -276,7 +276,7 @@ proc parseFormalParameters(ps: ParseState) : FormalParameters =
    while accept(ps, SEMI):
       add(rv.chld, parseFPSection(ps))
    
-   discard acceptOrFail(ps, RPAREN)
+   discard mustAccept(ps, RPAREN)
 
    if accept(ps, COLON):
       rv.retTy = parseQualident(ps)
@@ -287,7 +287,7 @@ proc parseFormalParameters(ps: ParseState) : FormalParameters =
 proc parseProcedureType(ps: ParseState) : ProcedureType = 
    let rv = ProcedureType()
 
-   discard acceptOrFail(ps, KPROCEDURE)
+   discard mustAccept(ps, KPROCEDURE)
    if curTok(ps) == LPAREN:
       rv.ty = parseFormalParameters(ps)
 
@@ -303,8 +303,8 @@ proc parseType(ps: ParseState) : AstNode =
       return parseArrayType(ps)
 
    of KPOINTER:
-      discard acceptOrFail(ps, KPOINTER)
-      discard acceptOrFail(ps, KTO)
+      discard mustAccept(ps, KPOINTER)
+      discard mustAccept(ps, KTO)
       return PointerType(rhs: parseType(ps))
 
    of KPROCEDURE:
@@ -316,9 +316,31 @@ proc parseType(ps: ParseState) : AstNode =
    else:
       err(ps, &"Was expecing a type, got {ps.scan.cur.kind}")
 
+proc parseStatement(ps: ParseState) : AstNode  
+proc parseStatementSequence(ps: ParseState) : StatementSequence
+
 # IF expression THEN StatementSequence {ELSIF expression THEN StatementSequence}
 #                                      [ELSE StatementSequence] END
-#proc parseStatement(ps: ParseState) : AstNode = 
+proc parseIf(ps: ParseState) : IfStatement = 
+   let rv = IfStatement()
+
+   discard mustAccept(ps, KIF)
+   add(rv.tests, parseExpression(ps))
+   discard mustAccept(ps, KTHEN)
+   add(rv.bodies, parseStatementSequence(ps))
+
+   while accept(ps, KELSIF):
+      add(rv.tests, parseExpression(ps))
+      discard mustAccept(ps, KTHEN)
+      add(rv.bodies, parseStatementSequence(ps))
+
+   if accept(ps, KELSE):
+      add(rv.tests, nil)
+      add(rv.bodies, parseStatementSequence(ps))
+
+   discard mustAccept(ps, KEND)
+   return rv
+
 
 # statement {";" statement}
 proc parseStatementSequence(ps: ParseState) : StatementSequence = 
@@ -335,6 +357,170 @@ proc parseStatementSequence(ps: ParseState) : StatementSequence =
 
    return rv
 
+# ExpList := expression {"," expression}
+proc parseExpressionList(ps: ParseState) : ExpressionList = 
+   let rv = ExpressionList()
+
+   add(rv.chld, parseExpression(ps))
+   while accept(ps, COMMA):
+      add(rv.chld, parseExpression(ps))
+
+   return rv
+
+# selector := "." ident | "[" ExpList "]" | "^" |  "(" qualident ")"
+# Return null if we're not at a selector.
+proc maybeParseSelector(ps: ParseState) : Selector = 
+   let start = restartPoint(ps.scan)
+
+   if accept(ps, DOT):
+      return Selector(kind: skFieldAccess, arg: parseIdent(ps))
+   elif accept(ps, LBRACKET):
+      let rv = Selector(kind: skArrayAccess, arg: parseExpressionList(ps))
+      discard mustAccept(ps, RBRACKET)
+      return rv
+   elif accept(ps, CARET):
+      return Selector(kind: skPtrDeref)
+   elif accept(ps, LPAREN):
+      ## We do some speculative parsing here.  There's an ambiguity
+      ## with A(B) being a procedure call or a type guard.  We're not
+      ## building a symbol table while we build the AST, so all we can
+      ## do right now is back out of the parse if it's definitely not 
+      ## a type guard.  Later on, the semcheck stage will have enough 
+      ## information to fix up any mistaken one parameter function calls
+      ## back to being procedure calls.
+      let rv = Selector(kind: skTypeAssert, arg: parseQualIdent(ps))
+
+      if rv.arg == nil or not accept(ps, RPAREN):
+         rewind(ps.scan, start)
+         return nil
+      else:
+         return rv
+   else:
+      return nil
+
+
+# designator := qualident {selector}
+proc parseDesignator(ps: ParseState) : Designator = 
+   let rv = Designator(leading: parseQualident(ps))
+
+   while (let sel = maybeParseSelector(ps); sel != nil):
+      add(rv.chld, sel)
+
+   return rv
+
+# WHILE expression DO StatementSequence
+# {ELSIF expresion DO StatementSequence} END
+proc parseWhile(ps: ParseState) : WhileStatement = 
+   let rv = WhileStatement()
+
+   discard mustAccept(ps, KWHILE)
+   add(rv.chld, parseExpression(ps))
+   discard mustAccept(ps, KDO)
+   add(rv.chld, parseStatementSequence(ps))
+
+   while accept(ps, KELSIF):
+      add(rv.chld, parseExpression(ps))
+      discard mustAccept(ps, KDO)
+      add(rv.chld, parseStatementSequence(ps))
+
+   discard mustAccept(ps, KEND)
+   return rv
+
+
+# label := integer | string | qualident
+let CaseLabelFirsts = [ ConstInt, ConstString, ConstHexString, Id ]
+proc parseLabel(ps: ParseState) : AstNode = 
+   case curTok(ps)
+   of ConstInt, ConstString, ConstHexString:
+      discard next(ps.scan)
+      return Terminal(tok: ps.scan.prev)
+
+   of Id:
+      return parseQualident(ps)
+
+   else:
+      err(ps, "Was expecing int, string or qualfied identifier.")
+      return nil
+      
+# LabelRange := label [".." label]
+proc parseLabelRange(ps: ParseState) : LabelRange = 
+   let rv = LabelRange()
+
+   add(rv.chld, parseLabel(ps))
+   if accept(ps, DOTDOT):
+      add(rv.chld, parseLabel(ps))
+
+   return rv
+
+# CaseLabelList := LabelRange {"," LabelRange}
+proc parseCaseLabelList(ps: ParseState) : CaseLabelList = 
+   let rv = CaseLabelList()
+
+   add(rv.chld, parseLabelRange(ps))
+   while accept(ps, COMMA):
+      add(rv.chld, parseLabelRange(ps))
+
+   return rv
+      
+# case := [CaseLabelList ":" StatementSequence]
+proc parseCase(ps: ParseState) : Case = 
+   let rv = Case()
+
+   if curTok(ps) in CaseLabelFirsts:
+      add(rv.chld, parseCaseLabelList(ps))
+      discard mustAccept(ps, COLON)
+      add(rv.chld, parseStatementSequence(ps))
+
+   return rv
+
+# CASE expression OF case {"|" case} END
+proc parseCaseStatement(ps: ParseState) : CaseStatement = 
+   discard mustAccept(ps, KCASE)
+   let rv = CaseStatement()
+
+   add(rv.chld, parseExpression(ps))
+   discard mustAccept(ps, KOF)
+   add(rv.chld, parseCase(ps))
+
+   while accept(ps, BAR):
+      add(rv.chld, parseCase(ps))
+
+   discard mustAccept(ps, KEND)
+   return rv
+
+# REPEAT StatementSequence UNTIL expression
+proc parseRepeat(ps: ParseState) : RepeatStatement = 
+   discard mustAccept(ps, KREPEAT)
+   let rv = RepeatStatement()
+
+   add(rv.chld, parseStatementSequence(ps))
+   discard mustAccept(ps, KUNTIL)
+   add(rv.chld, parseExpression(ps))
+
+   return rv
+
+# FOR ident ":=" expression TO expresion [BY ConstExpression]
+#    DO StatementSequence END
+proc parseFor(ps: ParseState) : ForStatement = 
+   discard mustAccept(ps, KFOR)
+   let rv = ForStatement()
+
+   add(rv.chld, parseIdent(ps))
+   discard mustAccept(ps, COLEQ)
+   add(rv.chld, parseExpression(ps))
+   discard mustAccept(ps, KTO)
+   add(rv.chld, parseExpression(ps))
+   if accept(ps, KBY):
+      add(rv.chld, parseExpression(ps))
+   else:
+      add(rv.chld, nil)
+
+   discard mustAccept(ps, KDO)
+   add(rv.chld, parseStatementSequence(ps))
+   discard mustAccept(ps, KEND)
+
+   return rv
+
 # [assignment | ProcedureCall | IfStatement | CaseStatement | 
 #  WhileStatement | RepeatStatement | ForStatement]
 proc parseStatement(ps: ParseState) : AstNode = 
@@ -342,11 +528,157 @@ proc parseStatement(ps: ParseState) : AstNode =
    of KIF:
       return parseIf(ps)
 
+   of KWHILE:
+      return parseWhile(ps)
+
+   of KCASE:
+      return parseCaseStatement(ps)
+
+   of KREPEAT:
+      return parseRepeat(ps)
+
+   of KFOR:
+      return parseFor(ps)
+
+   of Id:
+      # Both ProcedureCall and Assignment have a leading production
+      # of "designator".  This is not fully resolved at parse time, so 
+      # there might be a skTypeGuard selector for a single arg parameter
+      # call.
+      let d = parseDesignator(ps)
+
+      if accept(ps, COLEQ):
+         let rv = Assignment()
+         add(rv.chld, d)
+         add(rv.chld, parseExpression(ps))
+         return rv
+      elif accept(ps, LPAREN):
+         let rv = ProcedureCall()
+         add(rv.chld, d)
+         add(rv.chld, parseExpressionList(ps))
+         discard mustAccept(ps, RPAREN)
+         return rv
+      elif d.endsWithTypeAssert():  
+         # Just a type assert by itself is ok.  It might also be a function 
+         # that doesn't get fixed up till symcheck.
+         return d
+      else:
+         err(ps, &"Was expecting statement, got {ps.scan.cur.kind}.")
+         return nil
+
    else:
-      #differentiate assignment from proc call
       return nil
 
-  
+proc parseDeclarationSequence(ps: ParseState) : DeclarationSequence
+
+# ProcedureHeading := PROCEDURE identdef [FormalParameters]
+proc parseProcedureHeading(ps: ParseState) : ProcedureHeading = 
+   discard mustAccept(ps, KPROCEDURE)
+   let rv = ProcedureHeading()
+
+   add(rv.chld, parseIdentDef(ps))
+   add(rv.chld, if curTok(ps) == LPAREN: parseFormalParameters(ps) else: nil)
+   return rv
+
+# ProcedureBody := DeclarationSequence [BEGIN StatementSequence]
+#                  [RETURN expression] END
+proc parseProcedureBody(ps: ParseState) : ProcedureBody =
+   let rv = ProcedureBody()
+
+   add(rv.chld, parseDeclarationSequence(ps))
+   add(rv.chld, if accept(ps, KBEGIN): parseStatementSequence(ps) else: nil)
+   add(rv.chld, if accept(ps, KRETURN): parseExpression(ps) else: nil)
+   discard mustAccept(ps, KEND)
+   return rv
+
+# ProcedureDeclaration := ProcedureHeading ";" ProcedureBody ident
+proc parseProcedureDeclaration(ps: ParseState) : ProcedureDeclaration = 
+   let rv = ProcedureDeclaration()
+
+   add(rv.chld, parseProcedureHeading(ps))
+   discard mustAccept(ps, SEMI)
+   add(rv.chld, parseProcedureBody(ps))
+   add(rv.chld, parseIdent(ps))
+   return rv
+
+
+# identdef = type
+proc parseTypeDeclaration(ps: ParseState) : TypeDeclaration = 
+   let rv = TypeDeclaration()
+
+   add(rv.chld, parseIdentDef(ps))
+   discard mustAccept(ps, EQ)
+   add(rv.chld, parseType(ps))
+   return rv
+
+# IdentList ":" type
+proc parseVariableDeclaration(ps: ParseState) : FieldList = 
+   return parseFieldList(ps)
+
+# DeclarationSequence := [CONST {ConstDeclaration ";"}]
+#                        [TYPE {TypeDeclaration ";"}]
+#                        [VAR {VariableDeclaration ";"}]
+#                        {ProcedureDeclaration ";"}
+proc parseDeclarationSequence(ps: ParseState) : DeclarationSequence = 
+   let rv = DeclarationSequence()
+
+   if accept(ps, KCONST):
+      while curTok(ps) == Id:
+         add(rv.chld, parseConstDeclaration(ps))
+         discard mustAccept(ps, SEMI)
+
+   if accept(ps, KTYPE):
+      while curTok(ps) == Id:
+         add(rv.chld, parseTypeDeclaration(ps))
+         discard mustAccept(ps, SEMI)
+
+   if accept(ps, KVAR):
+      while curTok(ps) == Id:
+         add(rv.chld, parseVariableDeclaration(ps))
+         discard mustAccept(ps, SEMI)
+
+   while curTok(ps) == KPROCEDURE:
+      add(rv.chld, parseProcedureDeclaration(ps))
+      discard mustAccept(ps, SEMI)
+
+   return rv
+
+
+   
+#import := ident [":=" ident].
+proc parseImport(ps: ParseState) : Import = 
+   let rv = Import()
+   add(rv.chld, parseIdent(ps))
+   if accept(ps, COLEQ):
+      # Alias goes in slot 1.
+      add(rv.chld, rv.chld[0])
+      rv.chld[0] = parseIdent(ps)
+
+   return rv
+
+#ImportList := IMPORT import {"," import} ";".
+proc parseImportList(ps: ParseState) : ImportList = 
+   discard mustAccept(ps, KIMPORT)
+   let rv = ImportList()
+   add(rv.chld, parseImport(ps))
+   while accept(ps, COMMA):
+      add(rv.chld, parseImport(ps))
+
+#module := MODULE ident ";" [ImportList] DeclarationSequence
+#         [BEGIN StatementSequence] END ident "." .
+proc parseModule(ps: ParseState) : Module = 
+   discard mustAccept(ps, KMODULE)
+   let rv = Module()
+   add(rv.chld, parseIdent(ps))
+   discard mustAccept(ps, SEMI)
+   add(rv.chld, if curTok(ps) == KIMPORT: parseImportList(ps) else: nil)
+   add(rv.chld, parseDeclarationSequence(ps))
+   add(rv.chld, if accept(ps, KBEGIN): parseStatementSequence(ps) else: nil)
+   discard mustAccept(ps, KEND)
+   add(rv.chld, parseIdent(ps))
+   discard mustAccept(ps, DOT)
+   return rv
+
 when isMainModule:
    import streams
    proc parser(txt: string) : ParseState = 
@@ -394,4 +726,96 @@ when isMainModule:
    toStr(parseType(ps5), sout, txt5)
    sout.write("\N")
    consumedAll(ps5)
+
+   let txt6 = "IF bozo > 1+2 THEN ELSIF cheese THEN ELSE END"
+   let ps6 = parser(txt6)
+   toStr(parseStatement(ps6), sout, txt6)
+   sout.write("\N")
+   consumedAll(ps6)
+
+   let txt7 = "Moddy.bim[12,x].hoser^"
+   let ps7 = parser(txt7)
+   toStr(parseDesignator(ps7), sout, txt7)
+   sout.write("\N")
+   consumedAll(ps7)
+
+   let txt8 = "Dick(t).bo := 12; Dick.Tater(d) := \"barf\"; Jimmy.Cheesburger(12)"
+   let ps8 = parser(txt8)
+   toStr(parseStatementSequence(ps8), sout, txt8)
+   sout.write("\N")
+   consumedAll(ps8)
+
+   let txt9 = "WHILE x < 12 DO x := x + 1 ELSIF x < 0 DO x := 1 END"
+   let ps9 = parser(txt9)
+   toStr(parseStatementSequence(ps9), sout, txt9)
+   sout.write("\N")
+   consumedAll(ps9)
+
+   let txt10 = "CASE x+3 OF 1: print(x) | 2..10, 15: print(99) END"
+   let ps10 = parser(txt10)
+   toStr(parseStatementSequence(ps10), sout, txt10)
+   sout.write("\N")
+   consumedAll(ps10)
+
+   let txt11 = "REPEAT IO.print(JackAss); x := x+1 UNTIL x = 12"
+   let ps11 = parser(txt11)
+   toStr(parseStatementSequence(ps11), sout, txt11)
+   sout.write("\N")
+   consumedAll(ps11)
+
+   let txt12 = "FOR x := 1 TO 10 DO Check.This(x, 12) END"
+   let ps12 = parser(txt12)
+   toStr(parseStatementSequence(ps12), sout, txt12)
+   sout.write("\N")
+   consumedAll(ps12)
+
+   let txt13 = "FOR x := 1 TO 10 BY 2 DO Check.This(x, 13) END"
+   let ps13 = parser(txt13)
+   toStr(parseStatementSequence(ps13), sout, txt13)
+   sout.write("\N")
+   consumedAll(ps13)
+
+   let txt15 = """
+   PROCEDURE Default*(VAR o: R);
+   CONST balls = 123;
+   VAR up: Ast.Declarations;
+       i: Momo;
+   BEGIN
+      o.checkIndex := TRUE;
+      o.checkArith := TRUE;
+      RETURN o
+   END Default"""
+   let ps15 = parser(txt15)
+   toStr(parseProcedureDeclaration(ps15), sout, txt15)
+   sout.write("\N")
+   consumedAll(ps15)
+
+   let txt16 = """
+      MODULE GeneratorC;
+      IMPORT
+         V, Ast, SpecIdent := OberonSpecIdent
+      CONST
+         Supported* = TRUE;
+         Implementation=0;
+      TYPE
+         PMemoryOut = POINTER TO MemoryOut;
+         MemoryOut = RECORD(Stream.Out)
+            mem: ARRAY 2 OF RECORD
+               buf: ARRAY 4096 of CHAR;
+               len: Inty
+            END;
+            invert: BOOLO
+         END;
+      VAR
+         hoser = Supported;
+      PROCEDURE MemoryWrite(VAR out: MemoryOut; buf: ARRAY OF CHAR; ofs, count: INO);
+      BEGIN
+         Ass()
+      END MemoryWrite;
+   END GeneratorC.
+"""
+   let ps16 = parser(txt16)
+   toStr(parseModule(ps16), sout, txt16)
+   sout.write("\N")
+   consumedAll(ps16)
 
