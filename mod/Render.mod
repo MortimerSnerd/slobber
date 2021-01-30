@@ -1,7 +1,7 @@
 (* Test module for turning a AST tree back into source *)
 MODULE Render;
 IMPORT
-   Ast, Dbg, Files, Lex := Scanner, P := Parser;
+   Ast, Dbg, Files, Lex := Scanner;
 
 CONST
    Indent=3;
@@ -129,9 +129,8 @@ END WriteTerminal;
 PROCEDURE WriteTreeImpl*(n: Ast.T);
 VAR term: Ast.Terminal;
     b, x: Ast.Branch;
-    any0, any1: Ast.T;
+    any0: Ast.T;
     i: INTEGER;
-    check: BOOLEAN;
 BEGIN
    IF n # NIL THEN
       IF n IS Ast.Terminal THEN
@@ -185,7 +184,7 @@ BEGIN
                OLn;
                WriteTreeImpl(C(b, Ast.FieldListIdents));
                OS(": ");
-               WriteTreeImpl(C(b, Ast.FieldListType));
+               WriteTreeImpl(C(b, Ast.FieldListType))
 
             |Ast.BkQualIdent:
                any0 := C(b, Ast.QualIdentModule);
@@ -197,7 +196,7 @@ BEGIN
             |Ast.BkFieldListSequence:
                FOR i := 0 TO b.childLen-1 DO
                   WriteTreeImpl(C(b, i));
-                  IF i < (b.childLen-1) THEN OSemi END;
+                  IF i < (b.childLen-1) THEN OSemi END
                END
 
             |Ast.BkVarDeclaration:
@@ -214,12 +213,12 @@ BEGIN
                IF (b.childLen > 1) OR (any0 # NIL) THEN
                   OS("(");
                   WriteDelimList(b, "; ", Ast.FormalParamsStart, b.childLen-1);
-                  OS(")");
+                  OS(")")
                END;
                IF any0 # NIL THEN
                   OS(": ");
                   WriteTreeImpl(any0)
-               END;
+               END
 
             |Ast.BkFPSection:
                WriteDelimList(b, ", ", 0, b.childLen-2);
@@ -245,7 +244,7 @@ BEGIN
                OS("VAR");
                INC(st.indent);
                FOR i := 0 TO b.childLen-1 DO
-                  OLn; WriteTreeImpl(C(b, i)); OSemi;
+                  OLn; WriteTreeImpl(C(b, i)); OSemi
                END;
                DEC(st.indent);
                OLn
@@ -254,7 +253,7 @@ BEGIN
                WriteTreeImpl(C(b, Ast.ConstDeclName));
                OS("=");
                WriteTreeImpl(C(b, Ast.ConstDeclVal));
-               OSemi;OLn;
+               OSemi;OLn
 
             |Ast.BkModule: 
                OS("MODULE "); WriteTree(C(b, Ast.ModuleName));
@@ -276,7 +275,7 @@ BEGIN
                   OS("IMPORT");INC(st.indent);OLn;
                   WriteDelimList(b, ", ", 0, b.childLen-1);
                   DEC(st.indent);
-                  OSemi;OLn;
+                  OSemi;OLn
                END
 
             |Ast.BkPointer:
@@ -347,7 +346,7 @@ BEGIN
                any0 := C(b, Ast.ImportAlias);
                IF any0 # NIL THEN
                   WriteTreeImpl(any0);
-                  OS(":=");
+                  OS(":=")
                END;
                WriteTreeImpl(C(b, Ast.ImportModule))
 
