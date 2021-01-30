@@ -17,7 +17,7 @@ END nxt;
 
 BEGIN
    Out.String("Ho ho"); Out.Ln;
-   Lex.InitFromString(scan, "barf12x 12 12X 12H 12.3E4 (* holy (* crap *)*)  +<=#..IF WHILE <= >= 1..2 INTEGER");
+   scan := Lex.NewFromString("barf12x 12 12X 12H 12.3E4 (* holy (* crap *)*)  +<=#..IF WHILE <= >= 1..2 INTEGER");
    nxt(); ASSERT(t = Lex.Id);
    nxt(); ASSERT(t = Lex.ConstInt);
    nxt(); ASSERT(t = Lex.ConstHexString);
@@ -38,21 +38,18 @@ BEGIN
    nxt(); ASSERT(t = Lex.EOF);
 
    Out.String("Read Scanner.mod"); Out.Ln;
-   IF Lex.InitFromFile(scan, "Scanner.mod") THEN
-      Out.String("  read bytes: "); Out.Int(scan.len, 0); Out.Ln;
-      REPEAT
-         testpos := scan.pos;
-         t := Lex.Next(scan);
-         IF t = Lex.GARBAGE THEN
-            Out.String("   GARBAGE AT "); Out.Int(testpos, 0); Out.Ln
-         ELSIF verbose THEN
-            Out.String(" ");Out.Int(testpos, 0); Out.String(":"); Out.Int(t, 0)
-         END
-      UNTIL t = Lex.EOF;
-      Out.Ln; Out.String("   all file tokens read.")
-   ELSE
-      Out.String("Can't open file?"); Out.Ln
-   END;
+   scan := Lex.NewFromFile("Scanner.mod");
+   Out.String("  read bytes: "); Out.Int(scan.len, 0); Out.Ln;
+   REPEAT
+      testpos := scan.pos;
+      t := Lex.Next(scan);
+      IF t = Lex.GARBAGE THEN
+         Out.String("   GARBAGE AT "); Out.Int(testpos, 0); Out.Ln
+      ELSIF verbose THEN
+         Out.String(" ");Out.Int(testpos, 0); Out.String(":"); Out.Int(t, 0)
+      END
+   UNTIL t = Lex.EOF;
+   Out.Ln; Out.String("   all file tokens read.");
    ASSERT(scan.line = 464);
    Out.String("Done"); Out.Ln
 END TestScanner.

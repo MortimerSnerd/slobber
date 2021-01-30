@@ -85,8 +85,28 @@ modules, but it seems like it could be a closer to a systems level language
 with control over structure layout, a little more allocation control.  
 
 
+### Parser testing
 
+Feeding the parser more source.  Shook out some bugs.
+
+The EBNF doesn't reflect how most source in the wild 
+has a semicolon between the last statement in a sequence
+and a closing RETURN statement.  I suspect this is because
+there isn't really a lookahead notation in EBNF that would allow
+StatementSequence to say "it's ok for there to be no
+statement after a semicolon if the next token is a RETURN".
+
+I work around this by just doing the check in StatementSequence and
+adding a comment that points out the difference to the EBNF for 
+that function. 
    
+I thought I was pretty good at dealing with the semicolon 
+placement. Feeding more of my source to the parser tells a 
+different story.  obnc is more forgiving than I thought. 
+Probably so programmers wouldn't set it on fire and throw it 
+off a building.  
 
-   
-
+For testing, looking at the generated trees doesn't get far.
+Writing a quick renderer that will convert an AST back to 
+source, so I can compile and test to verify that it's at
+least accurate enough to not mangle anything.

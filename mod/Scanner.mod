@@ -39,7 +39,9 @@ TYPE
                start*, len*: INTEGER
             END;
 
-   T* = RECORD
+
+   T* = POINTER TO TDesc;
+   TDesc* = RECORD
            buf*: ARRAY BufSz OF CHAR;
            pos*, len*, line*: INTEGER;
            cur*, prev*: Token
@@ -96,31 +98,34 @@ BEGIN
    p.prev := state.prev
 END Rewind;
 
-PROCEDURE InitFromString*(VAR scan: T; txt: ARRAY OF CHAR);
+PROCEDURE NewFromString*(txt: ARRAY OF CHAR): T;
+VAR scan: T;
 BEGIN
+   NEW(scan);
    scan.pos := 0;
    scan.buf[0] := 0X;
    scan.len := Strings.Length(txt);
    scan.line := 1;
-   Strings.Append(txt, scan.buf)
-END InitFromString;
+   Strings.Append(txt, scan.buf);
+   RETURN scan
+END NewFromString;
 
-PROCEDURE InitFromFile*(VAR scan: T; fname: ARRAY OF CHAR): BOOLEAN;
-VAR rv: BOOLEAN;
-    fh: Files.File;
+PROCEDURE NewFromFile*(fname: ARRAY OF CHAR): T;
+VAR fh: Files.File;
     ride: Files.Rider;
+    scan: T;
 BEGIN
+   NEW(scan);
    scan.pos := 0;
    scan.line := 1;
    fh := Files.Old(fname);
    scan.len := Files.Length(fh);
    ASSERT(scan.len < BufSz);
    Files.Set(ride, fh, 0);
-   rv := ~ride.eof;
    Files.ReadString(ride, scan.buf);
    Files.Close(fh);
-   RETURN rv 
-END InitFromFile;
+   RETURN scan 
+END NewFromFile;
 
 PROCEDURE IsWs(c: CHAR): BOOLEAN;
 BEGIN
@@ -156,6 +161,7 @@ BEGIN
             scan.pos := scan.pos + 2;
             INC(nesting)
          ELSE
+            IF c = LF THEN INC(scan.line) END;
             INC(scan.pos)
          END
       END

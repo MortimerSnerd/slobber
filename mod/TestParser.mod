@@ -8,25 +8,13 @@ VAR
     buf: ARRAY 256 OF CHAR;
 
 BEGIN
-   buf := "Holy.Crap";
-   Par.InitFromString(par, buf);
-   root := Par.ParseQualIdent(par);
+   buf := "ASSERT(Lex.InitFromFile(p.scan, fname))";
+   par := Par.NewFromString(buf);
+   root := Par.ParseStatement(par);
    root.ops.toStr(root, par.scan.buf, 0);
    Dbg.Ln;
 
-   buf := "PROCEDURE(a,b: INTEGER; VAR c: ARRAY OF REAL): Boarf";
-   Par.InitFromString(par, buf);
-   root := Par.ParseProcedureType(par);
-   root.ops.toStr(root, par.scan.buf, 0);
-   Dbg.Ln;   
-
-   buf := "MODULE Bones; IMPORT Lex:=Scanner, Strings; CONST Borked*=1; TYPE smedly* = POINTER TO CHAR; END Bones.";
-   Par.InitFromString(par, buf);
-   root := Par.ParseModule(par);
-   root.ops.toStr(root, par.scan.buf, 0);
-   Dbg.Ln;   
-
-   Par.InitFromFile(par, "TestParser.mod");
+   par := Par.NewFromFile("Parser.mod");
    root := Par.ParseModule(par);
    root.ops.toStr(root, par.scan.buf, 0);
    Dbg.Ln;   

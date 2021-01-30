@@ -19,10 +19,29 @@ CONST
    BkSetElement*=25;BkExpList*=26;BkStatementSeq*=27;BkIfStmt*=28;
    BkCaseStatement*=29;BkCase*=30;BkLabelRange*=31;BkCaseLabelList*=32;
    BkWhileStatement*=33;BkRepeatStatement*=34;BkForStatement*=35;
+   BkFieldListSequence*=36;BkIdentList*=37;BkConstDeclSeq*=38;
+   BkTypeDeclSeq*=39;BkVarDeclSeq*=40;BkProcDeclSeq*=41;
+   BkArrayDims*=42;
    BkMax* = 64;
 
    (* Flags that can be set on any node *)
    NfVar*=1; (* Is a VAR param *)
+
+   (* Indices for well known child locations for branches *)
+   ModuleName* = 0; ModuleImports* = 1; ModuleDecls* = 2; ModuleInit* = 3;
+   ImportAlias* = 0; ImportModule*=1;
+   ConstDeclName*=0; ConstDeclVal*=1;
+   TypeDeclName*=0; TypeDeclVal*=1;
+   RecordBaseType*=0;RecordFieldList*=1;
+   FieldListIdents*=0; FieldListType*=1;
+   QualIdentModule*=0; QualIdentName*=1;
+   ArrayTypeDims*=0;ArrayTypeType*=1;
+   VarDeclIdents*=0;VarDeclVal*=1;
+   FormalParamsReturn*=0;FormalParamsStart*=1;
+   ProcedureDeclName*=0;ProcedureDeclParams*=1;ProcedureDeclBody*=2;
+   ProcBodyDecls*=0; ProcBodyStmts*=1;ProcBodyReturn*=2;
+   ForStmtVarName*=0;ForStmtBegin*=1;ForStmtEnd*=2;ForStmtBy*=3;ForStmtBody*=4;
+   RepeatStmtBody*=0;RepeatStmtCond*=1;
 
    (* selKinds for MkSelector *)
    FieldAccess*=0; ArrayAccess*=1;PtrDeref*=2;TypeGuard*=3;
@@ -55,12 +74,11 @@ TYPE
       if more is necesary. See AddChild() and GetChild() for details.*)
    Branch* = POINTER TO BranchDesc;
    BranchDesc* = RECORD(T)
-      kind: INTEGER;
+      kind*: INTEGER;
       startIx, childLen*: INTEGER;
       chld*: ARRAY BranchChunkSz OF T;
       next, last: Branch
    END;
- 
 
  VAR
    (* the joy of manual vtables *)
@@ -141,7 +159,7 @@ BEGIN
    RETURN rv
 END MkImportList;
 
-(* 0 - alias name, 1 - module name *)
+(* 0 - alias name or nil, 1 - module name *)
 PROCEDURE MkImport*(): Branch;
 VAR rv: Branch;
 BEGIN
@@ -150,8 +168,8 @@ BEGIN
    RETURN rv
 END MkImport;
 
-(* just a sequence of ConstDeclaration, TypeDeclaration, VarDeclaration
-   and ProcedureDeclaration *)
+(* 0 - ConstDeclSeq, or nil.  1 - TypeDeclSeq or nil
+   2 - VarDeclSeq or nil. 3 - ProcDeclSeq or nil *)
 PROCEDURE MkDeclarationSequence*(): Branch;
 VAR rv: Branch;
 BEGIN
@@ -160,6 +178,7 @@ BEGIN
    RETURN rv
 END MkDeclarationSequence;
 
+(* 0 - identdef, 1 - val *)
 PROCEDURE MkConstDeclaration*(): Branch;
 VAR rv: Branch;
 BEGIN
@@ -168,6 +187,7 @@ BEGIN
    RETURN rv
 END MkConstDeclaration;
 
+(* 0 identdef, 1 - decl *)
 PROCEDURE MkTypeDeclaration*(): Branch;
 VAR rv: Branch;
 BEGIN
@@ -185,7 +205,7 @@ BEGIN
    RETURN rv
 END MkArrayType;
 
-(* 0 - base type, or nil.  1 - list of FieldList *)
+(* 0 - base type, or nil.  1 - FieldListSequence *)
 PROCEDURE MkRecordType*(): Branch;
 VAR rv: Branch;
 BEGIN
@@ -436,6 +456,69 @@ BEGIN
    RETURN rv
 END MkForStatement;
 
+(* 0..N of FieldList *)
+PROCEDURE MkFieldListSequence*(): Branch;
+VAR rv: Branch;
+BEGIN
+   NEW(rv);
+   InitBranch(rv, BkFieldListSequence);
+   RETURN rv
+END MkFieldListSequence;
+
+(* 0..N identdef *)
+PROCEDURE MkIdentList*(): Branch;
+VAR rv: Branch;
+BEGIN
+   NEW(rv);
+   InitBranch(rv, BkIdentList);
+   RETURN rv
+END MkIdentList;
+
+(* 0..N ConstDeclaration *)
+PROCEDURE MkConstDeclSeq*(): Branch;
+VAR rv: Branch;
+BEGIN
+   NEW(rv);
+   InitBranch(rv, BkConstDeclSeq);
+   RETURN rv
+END MkConstDeclSeq;
+
+(* 0..N TypeDeclaration *)
+PROCEDURE MkTypeDeclSeq*(): Branch;
+VAR rv: Branch;
+BEGIN
+   NEW(rv);
+   InitBranch(rv, BkTypeDeclSeq);
+   RETURN rv
+END MkTypeDeclSeq;
+
+(* 0..N VarDeclaration *)
+PROCEDURE MkVarDeclSeq*(): Branch;
+VAR rv: Branch;
+BEGIN
+   NEW(rv);
+   InitBranch(rv, BkVarDeclSeq);
+   RETURN rv
+END MkVarDeclSeq;
+
+(* 0..N ProcedureDeclaration *)
+PROCEDURE MkProcDeclSeq*(): Branch;
+VAR rv: Branch;
+BEGIN
+   NEW(rv);
+   InitBranch(rv, BkProcDeclSeq);
+   RETURN rv
+END MkProcDeclSeq;
+
+(* 0..N array dimensions *)
+PROCEDURE MkArrayDims*(): Branch;
+VAR rv: Branch;
+BEGIN
+   NEW(rv);
+   InitBranch(rv, BkArrayDims);
+   RETURN rv
+END MkArrayDims;
+
 (* Returns the Branch item i would go into, adding chunks
    to get there if necessary. *)
 PROCEDURE BranchForIndex(b: Branch; i: INTEGER): Branch;
@@ -579,6 +662,15 @@ BEGIN
    BranchNames[BkWhileStatement] := "WhileStatement";
    BranchNames[BkRepeatStatement] := "RepeatStatement";
    BranchNames[BkForStatement] := "ForStatement";
+   BranchNames[BkFieldListSequence] := "FieldListSequence";
+   BranchNames[BkIdentList] := "IdentList";
+   BranchNames[BkConstDeclSeq] := "ConstDeclSeq";
+   BranchNames[BkTypeDeclSeq] := "TypeDeclSeq";
+   BranchNames[BkVarDeclSeq] := "VarDeclSeq";
+   BranchNames[BkProcDeclSeq] := "ProcDeclSeq";
+   BranchNames[BkArrayDims] := "ArrayDims";
+
+
 END SetupBranchNames;
 
 BEGIN

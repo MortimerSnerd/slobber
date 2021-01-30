@@ -17,7 +17,8 @@ TYPE
       col, line, prod: INTEGER
    END;
 
-   T* = RECORD
+   T* = POINTER TO TDesc;
+   TDesc* = RECORD
       scan*: Lex.T;
       failed: BOOLEAN;
       curFile: ARRAY 1024 OF CHAR;
@@ -32,7 +33,7 @@ VAR
    ParseStatementSequence: PROCEDURE(VAR p: T): Ast.Branch;
    ParseExpression: PROCEDURE(VAR p: T): Ast.T;
 
-PROCEDURE BaseInit(VAR p: T); 
+PROCEDURE BaseInit(p: T); 
 VAR i: INTEGER;
 BEGIN
    p.dbci := 0;
@@ -43,23 +44,29 @@ BEGIN
    END
 END BaseInit;
 
-PROCEDURE InitFromString*(VAR p: T; src: ARRAY OF CHAR);
+PROCEDURE NewFromString*(src: ARRAY OF CHAR): T;
 VAR dum: Lex.TokKind;
+    p: T;
 BEGIN
+   NEW(p);
    BaseInit(p);
-   Lex.InitFromString(p.scan, src); dum := Lex.Next(p.scan);
-   p.failed := FALSE
-END InitFromString;
+   p.scan := Lex.NewFromString(src); dum := Lex.Next(p.scan);
+   p.failed := FALSE;
+   RETURN p
+END NewFromString;
 
-PROCEDURE InitFromFile*(VAR p: T; fname: ARRAY OF CHAR);
+PROCEDURE NewFromFile*(fname: ARRAY OF CHAR): T;
 VAR dum: Lex.TokKind;
+    p: T;
 BEGIN
+   NEW(p);
    BaseInit(p);
-   ASSERT(Lex.InitFromFile(p.scan, fname)); 
+   p.scan := Lex.NewFromFile(fname); 
    dum := Lex.Next(p.scan);
    p.failed := FALSE;
    p.curFile := fname
-END InitFromFile;
+   RETURN p
+END NewFromFile;
 
 PROCEDURE Discard(t: Lex.TokKind);
 BEGIN
@@ -100,12 +107,13 @@ BEGIN
    INC(p.dbci);
    IF p.dbci >= CtxRingBufSz THEN
       p.dbci := 0
-   END;
+   END
 END EnterCtx;
 
 PROCEDURE LeaveCtx(VAR p: T);
 BEGIN
    DEC(p.dbci);
+   IF p.dbci < 0 THEN p.dbci := CtxRingBufSz - 1 END;
    p.dbgCtxs[p.dbci].col := -1;
    p.dbgCtxs[p.dbci].line := -1;
    p.dbgCtxs[p.dbci].prod := Ast.BkBranch;
@@ -127,8 +135,7 @@ BEGIN
    (* Our error handling is sketchy, we'd need some epic
       if then chains to check p.failed for some of the productions,
       so for now, die on the first error. *)
-   ASSERT(FALSE); 
-
+   ASSERT(FALSE) 
 END Err;
 
 PROCEDURE Accept(VAR p: T; t: Lex.TokKind): BOOLEAN;
@@ -138,7 +145,7 @@ BEGIN
       rv := TRUE;
       Discard(Lex.Next(p.scan))
    ELSE
-      rv := FALSE;
+      rv := FALSE
    END
    RETURN rv
 END Accept;
@@ -270,7 +277,7 @@ VAR rv, dims: Ast.Branch;
 BEGIN
    EnterCtx(p, Ast.BkBranch);
    IF AcceptOrFail(p, Lex.KARRAY) THEN
-      dims := Ast.MkBranch();
+      dims := Ast.MkArrayDims();
       REPEAT
          Ast.AddChild(dims, ParseExpression(p))
       UNTIL p.failed OR ~Accept(p, Lex.COMMA);
@@ -290,7 +297,7 @@ PROCEDURE ParseIdentList(VAR p: T): Ast.Branch;
 VAR rv: Ast.Branch;
 BEGIN
    EnterCtx(p, Ast.BkBranch);
-   rv := Ast.MkBranch();
+   rv := Ast.MkIdentList();
    REPEAT
       Ast.AddChild(rv, ParseIdentDef(p))
    UNTIL p.failed OR ~Accept(p, Lex.COMMA);
@@ -318,10 +325,12 @@ END ParseFieldList;
 PROCEDURE ParseFieldListSequence(VAR p: T): Ast.Branch;
 VAR rv: Ast.Branch;
 BEGIN
-   rv := Ast.MkBranch();
-   WHILE ~p.failed & (CurTok(p) = Lex.Id) DO
-      Ast.AddChild(rv, ParseFieldList(p))
-   END;
+   rv := Ast.MkFieldListSequence();
+   IF CurTok(p) = Lex.Id THEN
+      REPEAT
+         Ast.AddChild(rv, ParseFieldList(p))
+      UNTIL p.failed OR ~Accept(p, Lex.SEMI)
+   END
    RETURN rv
 END ParseFieldListSequence;
 
@@ -339,7 +348,8 @@ BEGIN
       ELSE
          NilSlot(rv)
       END;
-      Ast.AddChild(rv, ParseFieldListSequence(p))
+      Ast.AddChild(rv, ParseFieldListSequence(p));
+      MustAccept(p, Lex.KEND)
    END;
    IF p.failed THEN rv := NIL END;
    LeaveCtx(p);
@@ -515,36 +525,57 @@ END ParseProcedureDeclaration;
                          [TYPE {TypeDeclaration ";"}] [VAR {VariableDeclaration ";"}]
                          {ProcedureDeclaration ";"} *)
 PROCEDURE ParseDeclarationSequence(VAR p: T): Ast.Branch;
-VAR rv: Ast.Branch;
+VAR rv, sc: Ast.Branch;
 BEGIN
    EnterCtx(p, Ast.BkDeclarationSequence);
    rv := Ast.MkDeclarationSequence();
    IF Accept(p, Lex.KCONST) THEN
+      sc := Ast.MkConstDeclSeq();
+      Ast.AddChild(rv, sc);
+      EnterCtx(p, Ast.BkConstDeclSeq);
       WHILE ~p.failed & (CurTok(p) = Lex.Id) DO 
-         Ast.AddChild(rv, ParseConstDeclaration(p));
+         Ast.AddChild(sc, ParseConstDeclaration(p));
          MustAccept(p, Lex.SEMI)
-      END
+      END;
+      LeaveCtx(p)
+   ELSE
+      NilSlot(rv)
    END;
 
    IF ~p.failed & Accept(p, Lex.KTYPE) THEN
+      sc := Ast.MkTypeDeclSeq();
+      Ast.AddChild(rv, sc);
+      EnterCtx(p, Ast.BkTypeDeclSeq);
       WHILE ~p.failed & (CurTok(p) = Lex.Id) DO
-         Ast.AddChild(rv, ParseTypeDeclaration(p));
+         Ast.AddChild(sc, ParseTypeDeclaration(p));
          MustAccept(p, Lex.SEMI)
-      END
+      END;
+      LeaveCtx(p)
+   ELSE
+      NilSlot(rv)
    END;
 
    IF ~p.failed & Accept(p, Lex.KVAR) THEN
+      sc := Ast.MkVarDeclSeq();
+      Ast.AddChild(rv, sc);
+      EnterCtx(p, Ast.BkVarDeclSeq);
       WHILE ~p.failed & (CurTok(p) = Lex.Id) DO
-         Ast.AddChild(rv, ParseVarDeclaration(p));
+         Ast.AddChild(sc, ParseVarDeclaration(p));
          MustAccept(p, Lex.SEMI)
-      END
+      END;
+      LeaveCtx(p)
+   ELSE
+      NilSlot(rv)
    END;
 
+   sc := Ast.MkProcDeclSeq();
+   Ast.AddChild(rv, sc);
+   EnterCtx(p, Ast.BkProcDeclSeq);
    WHILE ~p.failed & (CurTok(p) = Lex.KPROCEDURE) DO
-      Ast.AddChild(rv, ParseProcedureDeclaration(p));
+      Ast.AddChild(sc, ParseProcedureDeclaration(p));
       MustAccept(p, Lex.SEMI)
    END;
-
+   LeaveCtx(p);
    LeaveCtx(p);
    RETURN rv
 END ParseDeclarationSequence;
@@ -569,7 +600,11 @@ VAR rv: Ast.Branch;
 BEGIN
    rv := NIL;
    IF Accept(p, Lex.LPAREN) THEN
-      rv := ParseExpList(p);
+      IF CurTok(p) # Lex.RPAREN THEN
+         rv := ParseExpList(p)
+      ELSE 
+         rv := Ast.MkExpList()
+      END;
       MustAccept(p, Lex.RPAREN)
    END;
    RETURN rv
@@ -793,7 +828,7 @@ BEGIN
       IF CurTok(p) # Lex.KEND THEN
          REPEAT
             Ast.AddChild(rv, ParseCase(p))
-         UNTIL p.failed OR ~Accept(p, Lex.BAR);
+         UNTIL p.failed OR ~Accept(p, Lex.BAR)
       END;
       MustAccept(p, Lex.KEND)
    END;
@@ -832,7 +867,7 @@ END ParseIfStatement;
 (* ProcedureCall = designator [ActualParameters] *)
 (* [assignment | ProcedureCall | IfStatement | CaseStatement |
     WhileStatement | RepeatStatement | ForStatement] *)
-PROCEDURE ParseStatement(VAR p:T): Ast.Branch;
+PROCEDURE ParseStatement*(VAR p:T): Ast.Branch;
 VAR rv, desig: Ast.Branch;
     t: Lex.TokKind;
 BEGIN
@@ -849,7 +884,7 @@ BEGIN
       ELSIF CurTok(p) = Lex.LPAREN THEN
          rv := Ast.MkCall();
          Ast.AddChild(rv, desig);
-         Ast.AddChild(rv, ParseActualParameters(p));
+         Ast.AddChild(rv, ParseActualParameters(p))
       ELSE
          (* Probably a function call without params, or the designator
             greedily ate the function call params as a TypeGuard.  
@@ -874,15 +909,26 @@ BEGIN
 END ParseStatement; 
 
 (* StatementSequence = statement {";" statement} *)
+(* NB - not in the grammar, we do extra checks to allow 
+   StatementSequence to terminate after the semicolon that
+   divides the end of the sequence from the closing RETURN
+   statement for the procedure body. We were already looking
+   for RETURN anyway to detect empty statement sequences. *)
 PROCEDURE ParseStatementSequenceImpl(VAR p: T): Ast.Branch;
 VAR rv: Ast.Branch;
+    hitReturn: BOOLEAN;
 BEGIN
    EnterCtx(p, Ast.BkStatementSeq);
    rv := Ast.MkStatementSeq();
    IF (CurTok(p) # Lex.KEND) & (CurTok(p) # Lex.KRETURN) THEN
+      hitReturn := FALSE;
       REPEAT
-         Ast.AddChild(rv, ParseStatement(p))
-      UNTIL p.failed OR ~Accept(p, Lex.SEMI);
+         IF CurTok(p) = Lex.KRETURN THEN
+            hitReturn := TRUE
+         ELSE
+            Ast.AddChild(rv, ParseStatement(p))
+         END
+      UNTIL hitReturn OR p.failed OR ~Accept(p, Lex.SEMI)
    END;
    IF p.failed THEN rv := NIL END;
    LeaveCtx(p);
@@ -907,15 +953,15 @@ BEGIN
       rv := ParseSet(p)
    ELSIF t = Lex.Id THEN
       rv := ParseDesignator(p);
-      IF Accept(p, Lex.LPAREN) THEN
+      IF CurTok(p) = Lex.LPAREN THEN
          b := Ast.MkCall();
          Ast.AddChild(b, rv);
          Ast.AddChild(b, ParseActualParameters(p));
-         MustAccept(p, Lex.RPAREN);
          rv := b
       END
    ELSIF Accept(p, Lex.LPAREN) THEN
-      rv := ParseExpression(p)
+      rv := ParseExpression(p);
+      MustAccept(p, Lex.RPAREN)
    ELSIF Accept(p, Lex.TILDE) THEN
       b := Ast.MkUnOp();
       Ast.AddChild(b, Ast.MkTerminal(p.scan.prev));
@@ -977,7 +1023,7 @@ BEGIN
       Ast.AddChild(b, rv);
       Ast.AddChild(b, Ast.MkTerminal(p.scan.prev));
       Ast.AddChild(b, ParseTerm(p));
-      rv := b;
+      rv := b
    END;
    IF p.failed THEN rv := NIL END;
    RETURN rv
@@ -1002,7 +1048,7 @@ BEGIN
       Ast.AddChild(b, rv); 
       Ast.AddChild(b, Ast.MkTerminal(p.scan.prev));
       Ast.AddChild(b, ParseSimpleExpression(p));
-      rv := b;
+      rv := b
    END;
    IF p.failed THEN rv := NIL END;
    RETURN rv
@@ -1044,7 +1090,7 @@ BEGIN
          Ast.AddChild(rv, t0);
          Ast.AddChild(rv, ParseIdent(p))
       ELSE
-         Ast.AddChild(rv, t0);  (* Just fill in name as alias *)
+         NilSlot(rv);
          Ast.AddChild(rv, t0)
       END
    END;
@@ -1098,7 +1144,7 @@ BEGIN
             name1 := ParseIdent(p);
             IF Lex.Eql(p.scan, name0.tok, name1.tok) THEN
                IF AcceptOrFail(p, Lex.DOT) THEN
-                  final := rv;
+                  final := rv
                END
             ELSE
                Err(p, "END does not match module name.")
