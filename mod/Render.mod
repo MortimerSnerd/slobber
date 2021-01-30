@@ -141,7 +141,7 @@ BEGIN
          END
       ELSE
          b := n(Ast.Branch);
-         Dbg.S("Branch "); Dbg.S(Ast.BranchNames[b.kind]); Dbg.Ln;
+         (* Dbg.S("Branch "); Dbg.S(Ast.BranchNames[b.kind]); Dbg.Ln;*)
          CASE b.kind OF
             Ast.BkDeclarationSequence, Ast.BkDesignator, Ast.BkProcDeclSeq,
             Ast.BkUnOp:
@@ -221,6 +221,9 @@ BEGIN
                END
 
             |Ast.BkFPSection:
+               IF Ast.NfVar IN b.flags THEN
+                  OS("VAR ")
+               END;
                WriteDelimList(b, ", ", 0, b.childLen-2);
                OS(": ");
                WriteTreeImpl(C(b, b.childLen-1))

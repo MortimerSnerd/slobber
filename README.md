@@ -111,3 +111,25 @@ For testing, looking at the generated trees doesn't get far.
 Writing a quick renderer that will convert an AST back to 
 source, so I can compile and test to verify that it's at
 least accurate enough to not mangle anything.
+
+### 1/30/21
+That actually worked better than I expected.  I added a
+test script that parses all of our source, renders it out
+into a test directory, and then builds it.  That shook out a
+lot of cases I missed or flubbed in the tree building.
+And then it does another pass using the executable compiled
+from the rendered code, and checks to see if the executable
+produced by this pass matches the previous one.
+
+The obvious downside is this only exercises the constructs that
+I used in the source code.  I will need to pull some oberon from
+other sources and do some parse and render passes on those as well
+to make sure I'm not missing anything else.  
+
+I missed some cases in the renderer that an exhaustive matching
+case would have helped me catch without an exception.
+
+
+
+
+
