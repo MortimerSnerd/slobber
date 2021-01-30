@@ -960,7 +960,9 @@ BEGIN
          rv := b
       END
    ELSIF Accept(p, Lex.LPAREN) THEN
-      rv := ParseExpression(p);
+      b := Ast.MkParenExpr();
+      Ast.AddChild(b, ParseExpression(p));
+      rv := b;
       MustAccept(p, Lex.RPAREN)
    ELSIF Accept(p, Lex.TILDE) THEN
       b := Ast.MkUnOp();

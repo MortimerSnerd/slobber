@@ -21,7 +21,7 @@ CONST
    BkWhileStatement*=33;BkRepeatStatement*=34;BkForStatement*=35;
    BkFieldListSequence*=36;BkIdentList*=37;BkConstDeclSeq*=38;
    BkTypeDeclSeq*=39;BkVarDeclSeq*=40;BkProcDeclSeq*=41;
-   BkArrayDims*=42;
+   BkArrayDims*=42;BkParenExpr*=43;
    BkMax* = 64;
 
    (* Flags that can be set on any node *)
@@ -519,6 +519,15 @@ BEGIN
    RETURN rv
 END MkArrayDims;
 
+(* 0 - some expression *)
+PROCEDURE MkParenExpr*(): Branch;
+VAR rv: Branch;
+BEGIN
+   NEW(rv);
+   InitBranch(rv, BkParenExpr);
+   RETURN rv
+END MkParenExpr;
+
 (* Returns the Branch item i would go into, adding chunks
    to get there if necessary. *)
 PROCEDURE BranchForIndex(b: Branch; i: INTEGER): Branch;
@@ -669,8 +678,7 @@ BEGIN
    BranchNames[BkVarDeclSeq] := "VarDeclSeq";
    BranchNames[BkProcDeclSeq] := "ProcDeclSeq";
    BranchNames[BkArrayDims] := "ArrayDims";
-
-
+   BranchNames[BkParenExpr] := "ParenExpr";
 END SetupBranchNames;
 
 BEGIN
