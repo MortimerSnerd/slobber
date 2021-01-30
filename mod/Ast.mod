@@ -678,7 +678,7 @@ BEGIN
    BranchNames[BkVarDeclSeq] := "VarDeclSeq";
    BranchNames[BkProcDeclSeq] := "ProcDeclSeq";
    BranchNames[BkArrayDims] := "ArrayDims";
-   BranchNames[BkParenExpr] := "ParenExpr";
+   BranchNames[BkParenExpr] := "ParenExpr"
 END SetupBranchNames;
 
 BEGIN
@@ -687,5 +687,5 @@ BEGIN
    termOps.toStr := TermToStr;
    branchOps.toStr := BranchToStr;
 
-   SetupBranchNames;
+   SetupBranchNames
 END Ast.

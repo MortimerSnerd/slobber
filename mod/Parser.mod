@@ -417,11 +417,11 @@ BEGIN
       IF (tk = Lex.KVAR) OR (tk = Lex.Id) THEN
          REPEAT
             Ast.AddChild(rv, ParseFPSection(p))
-         UNTIL p.failed OR ~Accept(p, Lex.SEMI);
-         MustAccept(p, Lex.RPAREN);
-         IF Accept(p, Lex.COLON) THEN
-            Ast.SetChild(rv, 0, ParseQualIdent(p))
-         END
+         UNTIL p.failed OR ~Accept(p, Lex.SEMI)
+      END;
+      MustAccept(p, Lex.RPAREN);
+      IF Accept(p, Lex.COLON) THEN
+         Ast.SetChild(rv, 0, ParseQualIdent(p))
       END
    END;
    IF p.failed THEN rv := NIL END;
@@ -618,16 +618,19 @@ BEGIN
    EnterCtx(p, Ast.BkSet);
    IF AcceptOrFail(p, Lex.LBRACE) THEN
       rv := Ast.MkSet();
-      REPEAT
-         el := Ast.MkSetElement();
-         Ast.AddChild(el, ParseExpression(p));
-         IF Accept(p, Lex.DOTDOT) THEN
-            Ast.AddChild(el, ParseExpression(p))
-         ELSE
-            NilSlot(el)
-         END;
-         Ast.AddChild(rv, el)
-      UNTIL p.failed OR ~Accept(p, Lex.COMMA)
+      IF CurTok(p) # Lex.RBRACE THEN
+         REPEAT
+            el := Ast.MkSetElement();
+            Ast.AddChild(el, ParseExpression(p));
+            IF Accept(p, Lex.DOTDOT) THEN
+               Ast.AddChild(el, ParseExpression(p))
+            ELSE
+               NilSlot(el)
+            END;
+            Ast.AddChild(rv, el)
+         UNTIL p.failed OR ~Accept(p, Lex.COMMA)
+      END;
+      MustAccept(p, Lex.RBRACE)
    END;
    IF p.failed THEN rv := NIL END;
    LeaveCtx(p);
