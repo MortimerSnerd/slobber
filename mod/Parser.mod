@@ -1075,9 +1075,13 @@ BEGIN
    Ast.AddChild(rv, ParseDeclarationSequence(p));
    IF Accept(p, Lex.KBEGIN) THEN
       Ast.AddChild(rv, ParseStatementSequence(p))
+   ELSE
+      NilSlot(rv)
    END;
    IF Accept(p, Lex.KRETURN) THEN
       Ast.AddChild(rv, ParseExpression(p))
+   ELSE
+      NilSlot(rv)
    END;
    MustAccept(p, Lex.KEND);
    IF p.failed THEN rv := NIL END;
