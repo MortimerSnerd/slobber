@@ -350,6 +350,38 @@ BEGIN
                END;
                WriteTreeImpl(C(b, Ast.ImportModule))
 
+            |Ast.BkCaseStatement:
+               OS("CASE ");
+               WriteTreeImpl(C(b, Ast.CaseStmtExpr));
+               OS(" OF");
+               INC(st.indent);OLn;
+               FOR i := Ast.CaseStmtCases TO b.childLen-1 DO
+                  IF i # Ast.CaseStmtCases THEN
+                     OLn;OS("|")
+                  END;
+                  WriteTreeImpl(C(b, i))
+               END;
+               DEC(st.indent);OLn;
+               OS("END")
+
+            |Ast.BkCase:
+               WriteTreeImpl(C(b, Ast.CaseLabelList));
+               OS(":");
+               INC(st.indent);
+               WriteTreeImpl(C(b, Ast.CaseStmtSeq));
+               DEC(st.indent)
+
+            |Ast.BkCaseLabelList:
+               WriteDelimList(b, ", ", 0, b.childLen-1)
+
+            |Ast.BkLabelRange:
+               WriteTreeImpl(C(b, Ast.LabelRangeStart));
+               any0 := C(b, Ast.LabelRangeEnd);
+               IF any0 # NIL THEN
+                  OS("..");
+                  WriteTreeImpl(any0)
+               END 
+
             |Ast.BkForStatement:
                OS("FOR ");
                WriteTreeImpl(C(b, Ast.ForStmtVarName));

@@ -42,6 +42,9 @@ CONST
    ProcBodyDecls*=0; ProcBodyStmts*=1;ProcBodyReturn*=2;
    ForStmtVarName*=0;ForStmtBegin*=1;ForStmtEnd*=2;ForStmtBy*=3;ForStmtBody*=4;
    RepeatStmtBody*=0;RepeatStmtCond*=1;
+   CaseStmtExpr*=0;CaseStmtCases*=1;
+   CaseLabelList*=0; CaseStmtSeq*=1;
+   LabelRangeStart*=0;LabelRangeEnd*=1;
 
    (* selKinds for MkSelector *)
    FieldAccess*=0; ArrayAccess*=1;PtrDeref*=2;TypeGuard*=3;

@@ -236,13 +236,8 @@ BEGIN
 END ParseIdentDef;
 
 PROCEDURE ParseConstExpression(VAR p: T): Ast.T;
-VAR rv: Ast.T;
 BEGIN
-   (*TODO*)
-   IF Accept(p, Lex.ConstInt) OR Accept(p, Lex.ConstReal) THEN
-      rv := Ast.MkTerminal(p.scan.prev)
-   END
-   RETURN rv
+   RETURN ParseExpression(p)
 END ParseConstExpression;
 
 (* identdef "=" ConstExpression. *)
@@ -445,18 +440,28 @@ BEGIN
 END ParseProcedureType;
 
 (* StrucType = ArrayType | RecordType | PointerType | ProcedureType *)
+(* NB - so it looks like in the updated spec, you can't do a type
+        alias, like Bork = Ast.T.  I need to look at more code and see
+        how common this is, but for now I will accept it because I use
+        an alias like this for Scanner.TokKind, which obnc obviously 
+        accepts *)
 PROCEDURE ParseStrucTypeImpl(VAR p: T): Ast.Branch;
 VAR rv: Ast.Branch;
+    t: Lex.TokKind;
 BEGIN
    rv := NIL;
-   IF CurTok(p) = Lex.KARRAY THEN
+   t := CurTok(p);
+   IF t = Lex.KARRAY THEN
       rv := ParseArrayType(p)
-   ELSIF CurTok(p) = Lex.KRECORD THEN
+   ELSIF t = Lex.KRECORD THEN
       rv := ParseRecordType(p)
-   ELSIF CurTok(p) = Lex.KPOINTER THEN
+   ELSIF t = Lex.KPOINTER THEN
       rv := ParsePointerType(p)
-   ELSIF CurTok(p) = Lex.KPROCEDURE THEN
+   ELSIF t = Lex.KPROCEDURE THEN
       rv := ParseProcedureType(p)
+   ELSIF t = Lex.Id THEN
+      (* See NB above function decl *)
+      rv := ParseQualIdent(p)
    ELSE
       Err(p, "Was expecting ARRAY, RECORD, POINTER or PROCEDURE.")
    END;

@@ -76,7 +76,8 @@ on Oberon.  I don't have hard opinions yet, I need to write more, but:
 8) Null terminated strings.  They get passed as open array, and they do the opposite
    thing that C does with null terminated strings, where the LEN("ads") = 4 because
    it counts the \0.  Took me a while to realize that when debugging why the scanner's
-   keyword checks weren't working.
+   keyword checks weren't working. (ie: LEN is always the length of the array, 
+   don't assume it's doing a Strings.Length() for you).
 
 It's interesting, it does remind me of C in that it is very "what you see is
 what you get".  Nothing more magic than copying records/arrays on assignments.
