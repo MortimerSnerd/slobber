@@ -165,14 +165,14 @@ BEGIN
             INC(scan.pos)
          END
       END
-   END;
+   END
 END SkipComment;
 
 PROCEDURE SkipWs(VAR scan:T);
 BEGIN
    WHILE (scan.pos < scan.len) & IsWs(scan.buf[scan.pos]) DO
       IF scan.buf[scan.pos] = LF THEN INC(scan.line) END;
-      INC(scan.pos);
+      INC(scan.pos)
    ELSIF (scan.pos < scan.len) & (la(scan, 0) = "(") & (la(scan, 1) = "*") DO
       SkipComment(scan)
    END
@@ -307,11 +307,11 @@ BEGIN
       ELSIF isDigit(c) THEN
          INC(i)
       ELSIF isWordSep(c) THEN
-         stop := TRUE;
+         stop := TRUE
       ELSE
          tok(scan, GARBAGE, i - scan.pos);
          stop := TRUE
-      END;
+      END
    END;
    IF scan.cur.kind = EOF THEN
       IF hexSeen THEN
@@ -339,7 +339,7 @@ BEGIN
      END;
      INC(i)
   END;
-  IF scan.cur.kind = EOF THEN tok(scan, GARBAGE, i - scan.pos) END;
+  IF scan.cur.kind = EOF THEN tok(scan, GARBAGE, i - scan.pos) END
 END lexString;
 
 PROCEDURE TokEql(s: T; pos: INTEGER; k: ARRAY OF CHAR): BOOLEAN;
@@ -348,7 +348,7 @@ VAR i, klen: INTEGER;
 BEGIN
    klen := LEN(k) - 1;  (* -1 to ignore null *)
    IF (pos + klen) > s.len THEN
-      rv := FALSE;
+      rv := FALSE
    ELSE
       i := 0;
       rv := TRUE;
@@ -357,8 +357,8 @@ BEGIN
             rv := FALSE
          ELSE
             INC(i)
-         END;
-      END;
+         END
+      END
    END;
    RETURN rv
 END TokEql;
@@ -369,7 +369,7 @@ VAR rv: BOOLEAN;
 BEGIN
    IF a.len = b.len THEN
       IF a.start = b.start THEN
-         rv := TRUE;
+         rv := TRUE
       ELSE
          i := 0;
          rv := TRUE;
@@ -393,9 +393,9 @@ BEGIN
    (* LEN(k)-1 - keep forgetting len includes the \0 *)
    IF TokEql(s, s.pos, k) & isWordSep(la(s, LEN(k)-1)) THEN   
       tok(s, kind, LEN(k)-1);
-      rv := TRUE;
+      rv := TRUE
    ELSE
-      rv := FALSE;
+      rv := FALSE
    END;
    RETURN rv
 END kcheck;
@@ -461,7 +461,7 @@ BEGIN
       tok(scan, Id, i - scan.pos)
    ELSE
       tok(scan, GARBAGE, 1)
-   END;
+   END
 END LexIdentifier;
    
 PROCEDURE Next*(VAR scan: T) : TokKind;
@@ -471,7 +471,7 @@ BEGIN
    scan.prev := scan.cur;
    scan.cur.kind := EOF;
    IF scan.pos >= scan.len THEN
-      scan.cur.len := 0;
+      scan.cur.len := 0
    ELSE
       c := scan.buf[scan.pos];
       IF c = "+" THEN tok(scan, PLUS, 1)
@@ -481,7 +481,7 @@ BEGIN
       ELSIF c = "~" THEN tok(scan, TILDE, 1)
       ELSIF c = "&" THEN tok(scan, AMPERSAND, 1)
       ELSIF c = "." THEN IF la(scan, 1) = "." THEN tok(scan, DOTDOT, 2) 
-                                              ELSE tok(scan, DOT, 1) END;
+                                              ELSE tok(scan, DOT, 1) END
       ELSIF c = "," THEN tok(scan, COMMA, 1)
       ELSIF c = ";" THEN tok(scan, SEMI, 1)
       ELSIF c = "|" THEN tok(scan, BAR, 1)
@@ -489,15 +489,15 @@ BEGIN
       ELSIF c = "[" THEN tok(scan, LBRACKET, 1)
       ELSIF c = "{" THEN tok(scan, LBRACE, 1)
       ELSIF c = ":" THEN IF la(scan, 1) = "=" THEN tok(scan, COLEQ, 2) 
-                                              ELSE tok(scan, COLON, 1); END;
+                                              ELSE tok(scan, COLON, 1) END
 
       ELSIF c = "^" THEN tok(scan, CARET, 1)
       ELSIF c = "=" THEN tok(scan, EQ, 1)
       ELSIF c = "#" THEN tok(scan, OCTOTHORPE, 1)
       ELSIF c = "<" THEN IF la(scan, 1) = "=" THEN tok(scan, LTE, 2) 
-                                              ELSE tok(scan, LT, 1) END;
+                                              ELSE tok(scan, LT, 1) END
       ELSIF c = ">" THEN IF la(scan, 1) = "=" THEN tok(scan, GTE, 2) 
-                                              ELSE tok(scan, GT, 1) END;
+                                              ELSE tok(scan, GT, 1) END
       ELSIF c = ")" THEN tok(scan, RPAREN, 1)
       ELSIF c = "]" THEN tok(scan, RBRACKET, 1)
       ELSIF c = "}" THEN tok(scan, RBRACE, 1)         
@@ -505,7 +505,7 @@ BEGIN
       ELSIF IsAlpha(c) THEN 
          IF ~AcceptKw(scan) THEN
             LexIdentifier(scan)
-         END;
+         END
       ELSIF isDigit(c) THEN
          lexNumberOrHexString(scan)
       END;
