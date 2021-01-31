@@ -920,7 +920,7 @@ END ParseStatement;
    semicolons in a sequence *)
 PROCEDURE EndsStatement(t: Lex.TokKind): BOOLEAN;
    RETURN (t = Lex.KEND) OR (t = Lex.KRETURN) OR (t = Lex.KELSE) OR
-          (t = Lex.KELSIF) OR (t = Lex.KUNTIL)
+          (t = Lex.KELSIF) OR (t = Lex.KUNTIL) OR (t = Lex.BAR)
 END EndsStatement; 
 
 (* StatementSequence = statement {";" statement} *)
@@ -933,10 +933,7 @@ END EndsStatement;
    We now check for and skip spurious semicolons. It's not
    in the published EBNF, but I ceased to care after finding
    that without it, I couldn't even parse the code from 
-   the Oberon compiler book. 
-
-   There's not much point in trying to stick to the published
-   EBNF *)
+   the Oberon compiler book. *)
 PROCEDURE ParseStatementSequenceImpl(VAR p: T): Ast.Branch;
 VAR rv: Ast.Branch;
     hitEnd: BOOLEAN;
