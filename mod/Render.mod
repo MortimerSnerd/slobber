@@ -141,7 +141,7 @@ BEGIN
          END
       ELSE
          b := n(Ast.Branch);
-         (* Dbg.S("Branch "); Dbg.S(Ast.BranchNames[b.kind]); Dbg.Ln;*)
+         Dbg.S("Branch "); Dbg.S(Ast.BranchNames[b.kind]); Dbg.Ln;
          CASE b.kind OF
             Ast.BkDeclarationSequence, Ast.BkDesignator, Ast.BkProcDeclSeq,
             Ast.BkUnOp:
@@ -377,7 +377,7 @@ BEGIN
             |Ast.BkCaseLabelList:
                WriteDelimList(b, ", ", 0, b.childLen-1)
 
-            |Ast.BkLabelRange:
+            |Ast.BkLabelRange, Ast.BkSetElement:
                WriteTreeImpl(C(b, Ast.LabelRangeStart));
                any0 := C(b, Ast.LabelRangeEnd);
                IF any0 # NIL THEN
