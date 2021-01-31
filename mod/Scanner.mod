@@ -4,7 +4,7 @@ IMPORT Files, Strings;
 CONST 
    (* For now, have a ridiculous buffer size to avoid 
       dealing with the Texts module, or buffering. *)
-   BufSz = 1024 * 64;
+   BufSz = 1024 * 128;
 
     (* Tokens *)
     EOF* = 0; 
