@@ -916,27 +916,44 @@ BEGIN
    RETURN rv
 END ParseStatement; 
 
+(* Tokens that end statements, we use this to deal with spurious
+   semicolons in a sequence *)
+PROCEDURE EndsStatement(t: Lex.TokKind): BOOLEAN;
+   RETURN (t = Lex.KEND) OR (t = Lex.KRETURN) OR (t = Lex.KELSE) OR
+          (t = Lex.KELSIF) OR (t = Lex.KUNTIL)
+END EndsStatement; 
+
 (* StatementSequence = statement {";" statement} *)
 (* NB - not in the grammar, we do extra checks to allow 
    StatementSequence to terminate after the semicolon that
    divides the end of the sequence from the closing RETURN
    statement for the procedure body. We were already looking
-   for RETURN anyway to detect empty statement sequences. *)
+   for RETURN anyway to detect empty statement sequences. 
+   
+   We now check for and skip spurious semicolons. It's not
+   in the published EBNF, but I ceased to care after finding
+   that without it, I couldn't even parse the code from 
+   the Oberon compiler book. 
+
+   There's not much point in trying to stick to the published
+   EBNF *)
 PROCEDURE ParseStatementSequenceImpl(VAR p: T): Ast.Branch;
 VAR rv: Ast.Branch;
-    hitReturn: BOOLEAN;
+    hitEnd: BOOLEAN;
 BEGIN
    EnterCtx(p, Ast.BkStatementSeq);
    rv := Ast.MkStatementSeq();
-   IF (CurTok(p) # Lex.KEND) & (CurTok(p) # Lex.KRETURN) THEN
-      hitReturn := FALSE;
+   IF ~EndsStatement(CurTok(p)) THEN
+      hitEnd := FALSE;
       REPEAT
-         IF CurTok(p) = Lex.KRETURN THEN
-            hitReturn := TRUE
+         IF EndsStatement(CurTok(p)) THEN
+            hitEnd := TRUE
+         ELSIF CurTok(p) = Lex.SEMI THEN
+            (* Empty statement, skip *)
          ELSE
             Ast.AddChild(rv, ParseStatement(p))
          END
-      UNTIL hitReturn OR p.failed OR ~Accept(p, Lex.SEMI)
+      UNTIL hitEnd OR p.failed OR ~Accept(p, Lex.SEMI)
    END;
    IF p.failed THEN rv := NIL END;
    LeaveCtx(p);
