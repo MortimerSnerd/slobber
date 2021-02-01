@@ -53,6 +53,10 @@ TYPE
    (* Root node of a tree *)
    T* = POINTER TO TreeDesc;
 
+   SourcePos* = RECORD
+      line*, col*, seek*: INTEGER
+   END;
+
    NodeOps* = RECORD
       toStr*: PROCEDURE(n: T; src: ARRAY OF CHAR; indent: INTEGER)
    END;
@@ -627,6 +631,37 @@ BEGIN
       Dbg.S("]")
    END
 END BranchToStr;
+
+(* Returns the best guess for the line number and colum of a construct.
+   Sets .line = -1 if no source position was found. *)
+PROCEDURE Position*(t: T; scan: Lex.T; VAR pos: SourcePos);
+   PROCEDURE Walk(t: T; scan: Lex.T; VAR pos: SourcePos): BOOLEAN;
+   VAR found: BOOLEAN;
+       i: INTEGER;
+       b: Branch;
+   BEGIN
+      found := FALSE;
+      IF t IS Terminal THEN
+         Dbg.S("TERMINAL ");Dbg.I(t(Terminal).tok.kind); Dbg.S(" "); Dbg.I(t(Terminal).tok.start); Dbg.Ln;
+         found := TRUE;
+         pos.seek := t(Terminal).tok.start;
+         pos.col := Lex.ColForPos(scan, pos.seek);
+         pos.line := Lex.LineForPos(scan, pos.seek)
+      ELSIF t IS Branch THEN
+         b := t(Branch);
+         i := 0;
+         WHILE ~found & (i < b.childLen) DO
+            found := Walk(GetChild(b, i), scan, pos);
+            INC(i)
+         END
+      ELSE
+         ASSERT(FALSE)  (* unknown T subtype *)
+      END;
+      RETURN found
+   END Walk;
+BEGIN
+   IF ~Walk(t, scan, pos) THEN pos.line := -1 END
+END Position;
 
 PROCEDURE SetupBranchNames();
 VAR i: INTEGER;

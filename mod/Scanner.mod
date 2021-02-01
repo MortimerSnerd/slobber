@@ -62,7 +62,7 @@ PROCEDURE ColForPos*(p:T; pos: INTEGER): INTEGER;
 VAR rv, i: INTEGER;
     found: BOOLEAN;
 BEGIN
-   rv := 1;
+   rv := 0;
    i := pos;
    found := FALSE;
    WHILE ~found & (i > 0) DO
@@ -75,6 +75,24 @@ BEGIN
 
    RETURN rv
 END ColForPos; 
+
+PROCEDURE LineForPos*(p: T; pos: INTEGER): INTEGER;
+VAR rv, i: INTEGER;
+BEGIN
+   rv := 1;
+   i := pos;
+   WHILE i >= 0 DO
+      (* being cheap and only checking for LF.  Too bad for old
+         CR only line separators *)
+      IF p.buf[i] = LF THEN
+         INC(rv)
+      END;
+      DEC(i)
+   END;
+   RETURN rv
+END LineForPos;
+         
+
 
 (* Calculates the column number from the current position *)
 PROCEDURE CurCol*(p:T): INTEGER;
