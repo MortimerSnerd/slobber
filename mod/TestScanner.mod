@@ -17,7 +17,8 @@ END nxt;
 
 BEGIN
    Out.String("Ho ho"); Out.Ln;
-   scan := Lex.NewFromString("barf12x 12 12X 12H 12.3E4 (* holy (* crap *)*)  +<=#..IF WHILE <= >= 1..2 INTEGER");
+   scan := Lex.NewFromString("2.2 barf12x 12 12X 12H 12.3E4 (* holy (* crap *)*)  +<=#..IF WHILE <= >= 1..2 INTEGER");
+   nxt(); ASSERT(t = Lex.ConstReal);
    nxt(); ASSERT(t = Lex.Id);
    nxt(); ASSERT(t = Lex.ConstInt);
    nxt(); ASSERT(t = Lex.ConstHexString);
@@ -50,7 +51,6 @@ BEGIN
       END
    UNTIL t = Lex.EOF;
    Out.Ln; Out.String("   all file tokens read.");
-   ASSERT(scan.line = 464);
    Out.String("Done"); Out.Ln
 END TestScanner.
 

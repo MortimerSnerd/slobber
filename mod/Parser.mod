@@ -21,7 +21,7 @@ TYPE
    TDesc* = RECORD
       scan*: Lex.T;
       failed: BOOLEAN;
-      curFile: ARRAY 1024 OF CHAR;
+      curFile*: ARRAY 1024 OF CHAR;
       dbgCtxs: ARRAY CtxRingBufSz OF DbgCtx;
       dbci: INTEGER (* next writable position in dbgCtxs *)
    END;
@@ -52,6 +52,7 @@ BEGIN
    BaseInit(p);
    p.scan := Lex.NewFromString(src); dum := Lex.Next(p.scan);
    p.failed := FALSE;
+   p.curFile := "[from string]";
    RETURN p
 END NewFromString;
 
@@ -1192,3 +1193,4 @@ BEGIN
    ParseStatementSequence := ParseStatementSequenceImpl;
    ParseExpression := ParseExpressionImpl
 END Parser.
+

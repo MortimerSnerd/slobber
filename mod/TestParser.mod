@@ -2,7 +2,7 @@ MODULE TestParser;
 IMPORT Ast, Dbg, Par := Parser;
 VAR 
     par: Par.T;
-    root: Ast.T;
+    root, t: Ast.T;
     buf: ARRAY 256 OF CHAR;
     pos: Ast.SourcePos;
 
@@ -23,8 +23,14 @@ BEGIN
    root.ops.toStr(root, par.scan.buf, 0);
    Dbg.Ln;   
 
-   Ast.Position(Ast.GetChild(root(Ast.Branch), Ast.ModuleDecls), par.scan, pos);
-   Dbg.S("Line/col of decls is "); Dbg.I(pos.line); Dbg.S(" "); Dbg.I(pos.col);Dbg.Ln;
+   t := Ast.FindBranch(root, Ast.BkTypeDeclaration);
+   IF t = NIL THEN
+      Dbg.S("no type decl?")
+   ELSE
+      Ast.Position(t, par.scan, pos);
+      Dbg.S("Line/col of decls is "); Dbg.I(pos.line); Dbg.S(" "); Dbg.I(pos.col)
+   END;
+   Dbg.Ln;
 
    Dbg.S("Done."); Dbg.Ln
 END TestParser.

@@ -30,6 +30,7 @@ CONST
    (* Indices for well known child locations for branches *)
    ModuleName* = 0; ModuleImports* = 1; ModuleDecls* = 2; ModuleInit* = 3;
    ImportAlias* = 0; ImportModule*=1;
+   DeclSeqConsts*=0; DeclSeqTypes*=1; DeclSeqVars*=2;DeclSeqProcs*=3;
    ConstDeclName*=0; ConstDeclVal*=1;
    TypeDeclName*=0; TypeDeclVal*=1;
    RecordBaseType*=0;RecordFieldList*=1;
@@ -641,8 +642,9 @@ PROCEDURE Position*(t: T; scan: Lex.T; VAR pos: SourcePos);
        b: Branch;
    BEGIN
       found := FALSE;
-      IF t IS Terminal THEN
-         Dbg.S("TERMINAL ");Dbg.I(t(Terminal).tok.kind); Dbg.S(" "); Dbg.I(t(Terminal).tok.start); Dbg.Ln;
+      IF t = NIL THEN
+         found := FALSE
+      ELSIF t IS Terminal THEN
          found := TRUE;
          pos.seek := t(Terminal).tok.start;
          pos.col := Lex.ColForPos(scan, pos.seek);
@@ -662,6 +664,29 @@ PROCEDURE Position*(t: T; scan: Lex.T; VAR pos: SourcePos);
 BEGIN
    IF ~Walk(t, scan, pos) THEN pos.line := -1 END
 END Position;
+
+
+(* Finds the first child branch of t that has the
+   kind of bKind.  Returns NIL if none found *)
+PROCEDURE FindBranch*(t: T; bKind: INTEGER): Branch;
+VAR rv, br: Branch;
+    i: INTEGER;
+BEGIN
+   rv := NIL;
+   IF t IS Branch THEN
+      br := t(Branch);
+      IF br.kind = bKind THEN
+         rv := br
+      ELSE
+         i := 0;
+         WHILE (rv = NIL) & (i < br.childLen) DO
+            rv := FindBranch(GetChild(br, i), bKind);
+            INC(i)
+         END
+      END
+   END;
+   RETURN rv
+END FindBranch;
 
 PROCEDURE SetupBranchNames();
 VAR i: INTEGER;

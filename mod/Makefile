@@ -1,4 +1,4 @@
-EXES=TestScanner TestParser TestRender
+EXES=TestScanner TestParser TestRender TestSymtab
 all: $(EXES)
 
 TestScanner: TestScanner.mod Scanner.mod
@@ -10,6 +10,8 @@ TestParser: TestParser.mod Scanner.mod Ast.mod Dbg.mod Parser.mod
 TestRender: TestRender.mod Scanner.mod Ast.mod Dbg.mod Parser.mod Render.mod
 	CFLAGS=-g obnc TestRender.mod
 
+TestSymtab: TestSymtab.mod Symtab.mod Scanner.mod Ast.mod Dbg.mod Parser.mod Types.mod
+	CFLAGS=-g obnc TestSymtab.mod
 
 clean:
 	rm -rf .obnc $(EXES)

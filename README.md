@@ -10,6 +10,26 @@ Parses Oberon into a AST with no semantic checking.  Very little testing
 so far, so it's output is probably only slightly better than crapping
 in a paper bag.  But it does nicely pretty print a AST.
 
+## TODOS
+
+- expand constant expression evaluator.  It would be nice 
+  if it wasn't in symtab, as it's a lot of boilerplate code, 
+  but it does need a hook into symtab lookups for constants.
+
+- Add procs to save and load the module symtabs. When we save
+  a symtab file for a module, just the public entries get saved.
+  Once we can load these, that's how we'll populate the modules
+  for imports.
+
+- Add vars section to symtab.
+
+- Add proc decls to symtab.
+
+- Once all the type information is in place, can 
+  do semantic and type checking, and fix up any
+  function calls that were parsed as type guards.
+ 
+
 ## Notes
 
 ### First checkin of scanner and parser in Oberon.
@@ -130,6 +150,30 @@ I missed some cases in the renderer that an exhaustive matching
 case would have helped me catch without an exception.
 
 
+### 2/2/21
 
+Building up the symbol table code is slow .  There are a lot of 
+moving parts that need to be in place just to be able to 
+parse the types.
 
+For example:
 
+    Store* = ARRAY NumEnts*2, Han.NumSlices OF SomeRec;
+
+Just to convert this type, we need to be able to lookup 
+previously defined constants, constants defined in other
+modules that we imported, and we need to be able to evaluate
+constant expressions so we know the exact array size.
+
+But going well enough.  I have an incomplete constant
+expression evaluator, and there's no such thing as 
+importing another module, but I can process the 
+const and type sections of a module otherwise. Including
+the one special case so POINTER TO X can be declared
+before X.
+
+Vars and procedure decls are left.  Vars are simple.
+For procedures, this pass just fills out the symbol
+tables with the declarations.  After that, there's
+enough information to do semantic checking on the 
+procedure and module bodies.

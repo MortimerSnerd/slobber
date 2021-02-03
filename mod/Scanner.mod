@@ -145,6 +145,12 @@ BEGIN
    RETURN scan 
 END NewFromFile;
 
+(* Copies the string for `tok` to `dest` *)
+PROCEDURE Extract*(scan: T; tok: Token; VAR dest: ARRAY OF CHAR); 
+BEGIN
+   Strings.Extract(scan.buf, tok.start, tok.len, dest)
+END Extract;
+
 PROCEDURE IsWs(c: CHAR): BOOLEAN;
 BEGIN
    RETURN (c = " ") OR (c = TAB) OR (c = CR) OR (c = LF)
@@ -307,7 +313,7 @@ BEGIN
       c := scan.buf[i];
       IF c = "." THEN
          (* Check for .. operator right against a number *)
-         IF la(scan, 1) = "." THEN
+         IF (i < (scan.len+1)) & (scan.buf[i+1] = ".") THEN
             tok(scan, ConstInt, i - scan.pos)
          ELSE
             lexReal(scan, i+1)
@@ -360,6 +366,9 @@ BEGIN
   IF scan.cur.kind = EOF THEN tok(scan, GARBAGE, i - scan.pos) END
 END lexString;
 
+(*TODO - this is a trap waiting to happen because this only works
+         when literal strings are passed in.  Because it's using
+         LEN(k) *)
 PROCEDURE TokEql(s: T; pos: INTEGER; k: ARRAY OF CHAR): BOOLEAN;
 VAR i, klen: INTEGER;
     rv: BOOLEAN;
@@ -380,6 +389,27 @@ BEGIN
    END;
    RETURN rv
 END TokEql;
+
+PROCEDURE EqlString*(scan: T; a: Token; b: ARRAY OF CHAR): BOOLEAN;
+VAR rv: BOOLEAN;
+    i: INTEGER;
+BEGIN
+   IF (a.len # Strings.Length(b)) OR ((a.start+a.len) >= scan.len) THEN
+      rv := FALSE;
+   ELSE
+      i := 0;
+      rv := TRUE;
+      WHILE rv & (i < a.len) DO
+         IF scan.buf[i+a.start] # b[i] THEN
+            rv := FALSE
+         ELSE
+            INC(i)
+         END
+      END
+   END;
+   RETURN rv
+END EqlString;    
+
 
 PROCEDURE Eql*(s: T; a, b: Token): BOOLEAN;
 VAR rv: BOOLEAN;
