@@ -9,6 +9,10 @@ CONST
    (* Type kinds *)
    KByte*=0; KInteger*=1; KBoolean*=2; KReal*=3; KChar*=4; KSet*=5;
    KArray*=10; KPointer*=11; KRecord*=12; KTypeError*=13; KDeferredPtrTarget*=14;
+   KProcedure*=15;
+
+   (* type flags *)
+   Export*=0; Var*=1;
 
    MaxNameLen=64;
    PrimLookupLen=6;
@@ -22,7 +26,8 @@ TYPE
       all you need. *)
    Type* = POINTER TO TypeDesc;
    TypeDesc* = RECORD
-      kind*: INTEGER
+      kind*: INTEGER;
+      flags*: SET
    END;
    
    ArrayType* = POINTER TO ArrayTypeDesc;
@@ -41,6 +46,7 @@ TYPE
    RecordFieldDesc* = RECORD
       name*: ARRAY MaxNameLen OF CHAR;
       ty*: Type;
+      export*: BOOLEAN;
       next*: RecordField
    END;
 
@@ -50,13 +56,31 @@ TYPE
       fields*: RecordField
    END;
 
+   ProcParam* = POINTER TO ProcParamDesc;
+   ProcParamDesc* = RECORD
+      (* not really needed, but helpful for debugging *)
+      name*: ARRAY MaxNameLen OF CHAR;  
+      ty*: Type;
+      (* Number of open array wrappers to the type *)
+      openArrays*: INTEGER;
+      next*: ProcParam
+   END;
+
+   ProcType* = POINTER TO ProcTypeDesc;
+   ProcTypeDesc* = RECORD(Type)
+      returnTy*: Type;
+      params*: ProcParam;
+      (* Pointer to the procedure body, if the procedure is 
+         in the current module. *)
+      body*: Ast.Branch
+   END;
+
    DeferredTarget* = POINTER TO DeferredTargetDesc;
    DeferredTargetDesc* = RECORD(Type)
       (* Reference in AST for this decl *)
       ast*: Ast.T;
       (* Name of record this is a placeholder for. *) 
       name*: ARRAY MaxNameLen OF CHAR
-            
    END;
 
 VAR
@@ -65,11 +89,35 @@ VAR
       (* These two arrays associate primitive names to 
          type kind constants *)
 
+PROCEDURE MkProcParam*(): ProcParam;
+VAR rv: ProcParam;
+BEGIN
+   NEW(rv);
+   rv.name := "";
+   rv.ty := NIL;
+   rv.openArrays := 0;
+   rv.next := NIL;
+   RETURN rv
+END MkProcParam; 
+
+PROCEDURE MkProcType*(): ProcType;
+VAR rv: ProcType;
+BEGIN
+   NEW(rv);
+   rv.kind := KProcedure;
+   rv.flags := {};
+   rv.returnTy := NIL;
+   rv.params := NIL;
+   rv.body := NIL;
+   RETURN rv
+END MkProcType;
+
 PROCEDURE MkDeferredTarget*(): DeferredTarget;
 VAR rv: DeferredTarget;
 BEGIN
    NEW(rv);
    rv.kind := KDeferredPtrTarget;
+   rv.flags := {};
    rv.name := "";
    rv.ast := NIL
    RETURN rv
@@ -82,6 +130,7 @@ BEGIN
    rv.name := "";
    rv.ty := NIL;
    rv.next := NIL;
+   rv.export := FALSE;
    RETURN rv
 END MkRecordField; 
    
@@ -90,6 +139,7 @@ VAR rv: RecordType;
 BEGIN
    NEW(rv);
    rv.kind := KRecord;
+   rv.flags := {};
    rv.base := NIL;
    rv.fields := NIL
    RETURN rv
@@ -100,6 +150,7 @@ VAR rv: PointerType;
 BEGIN
    NEW(rv);
    rv.kind := KPointer;
+   rv.flags := {};
    rv.ty := NIL
    RETURN rv
 END MkPointerType;
@@ -109,6 +160,7 @@ VAR rv: ArrayType;
 BEGIN
    NEW(rv);
    rv.kind := KArray;
+   rv.flags := {};
    rv.ndims := 0;
    rv.ty := NIL
    RETURN rv
@@ -119,8 +171,41 @@ VAR rv: Type;
 BEGIN
    NEW(rv);
    rv.kind := kind;
+   rv.flags := {};
    RETURN rv
 END MkPrim;
+
+PROCEDURE RevRecordFieldList*(VAR l: RecordField);
+VAR x, next, last: RecordField;
+BEGIN
+   IF l # NIL THEN
+      last := NIL;
+      x := l;
+      WHILE x # NIL DO
+         next := x.next;
+         x.next := last;
+         last := x;
+         x := next
+      END;
+      l := last
+   END
+END RevRecordFieldList;
+
+PROCEDURE RevProcParam*(VAR l: ProcParam);
+VAR x, next, last: ProcParam;
+BEGIN
+   IF l # NIL THEN
+      last := NIL;
+      x := l;
+      WHILE x # NIL DO
+         next := x.next;
+         x.next := last;
+         last := x;
+         x := next
+      END;
+      l := last
+   END
+END RevProcParam;
 
 (* Return TyKind for primitive, or KTypeError if not recognized *)
 PROCEDURE LookupPrimitive*(scan: Lex.T; tok: Lex.Token): INTEGER;
@@ -166,7 +251,9 @@ VAR i: INTEGER;
     pt: PointerType;
     rt: RecordType;
     fld: RecordField;
+    pfld: ProcParam;
     dt: DeferredTarget;
+    proc: ProcType;
 BEGIN
    Dbg.Ind(indent);
    CASE t.kind OF
@@ -199,6 +286,7 @@ BEGIN
       WHILE fld # NIL DO
          Dbg.Ln; Dbg.Ind(indent+1);
          Dbg.S(fld.name);
+         IF fld.export THEN Dbg.S("*") END;
          Dbg.Ln; DbgPrint(fld.ty, indent+2);
          fld := fld.next
       END
@@ -207,13 +295,31 @@ BEGIN
    |KDeferredPtrTarget:
       dt := t(DeferredTarget);
       Dbg.S("DEFERRED RESOLVE: "); Dbg.S(dt.name)
+   |KProcedure:
+      Dbg.S("PROCEDURE");
+      proc := t(ProcType);
+      IF proc.returnTy # NIL THEN
+         Dbg.Ln; Dbg.Ind(indent+1);
+         Dbg.S("RETURNS"); Dbg.Ln;
+         DbgPrint(proc.returnTy, indent+2)
+      END;
+      pfld := proc.params;
+      WHILE pfld # NIL DO
+         Dbg.Ln;Dbg.Ind(indent+1);
+         IF Var IN pfld.ty.flags THEN
+            Dbg.S("VAR ")
+         END;
+         Dbg.S(pfld.name);
+         IF pfld.openArrays > 0 THEN
+            Dbg.S(" ARRAY OF * "); Dbg.I(pfld.openArrays)
+         END;
+         Dbg.S(":"); Dbg.Ln;
+         DbgPrint(pfld.ty, indent+2);
+         pfld := pfld.next
+      END
    END
 END DbgPrint;
       
-      
-
-
-
 PROCEDURE SetupTables();
    PROCEDURE PAssoc(i: INTEGER; n: ARRAY OF CHAR; k: INTEGER);
    BEGIN
