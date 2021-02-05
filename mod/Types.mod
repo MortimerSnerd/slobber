@@ -18,6 +18,9 @@ CONST
    PrimLookupLen=6;
 
 TYPE
+   (* Extra information returned by type matching functions *)
+   MatchCtx* = INTEGER;
+
    QualName* = RECORD
       module*, name*: ARRAY MaxNameLen OF CHAR
    END;
@@ -27,7 +30,10 @@ TYPE
    Type* = POINTER TO TypeDesc;
    TypeDesc* = RECORD
       kind*: INTEGER;
-      flags*: SET
+      flags*: SET;
+      (* Number of open array wrappers to the type. This is only
+         valid for procedure parameters *)
+      openArrays*: INTEGER
    END;
    
    ArrayType* = POINTER TO ArrayTypeDesc;
@@ -61,8 +67,6 @@ TYPE
       (* not really needed, but helpful for debugging *)
       name*: ARRAY MaxNameLen OF CHAR;  
       ty*: Type;
-      (* Number of open array wrappers to the type *)
-      openArrays*: INTEGER;
       next*: ProcParam
    END;
 
@@ -95,7 +99,6 @@ BEGIN
    NEW(rv);
    rv.name := "";
    rv.ty := NIL;
-   rv.openArrays := 0;
    rv.next := NIL;
    RETURN rv
 END MkProcParam; 
@@ -105,6 +108,7 @@ VAR rv: ProcType;
 BEGIN
    NEW(rv);
    rv.kind := KProcedure;
+   rv.openArrays := 0;
    rv.flags := {};
    rv.returnTy := NIL;
    rv.params := NIL;
@@ -117,6 +121,7 @@ VAR rv: DeferredTarget;
 BEGIN
    NEW(rv);
    rv.kind := KDeferredPtrTarget;
+   rv.openArrays := 0;
    rv.flags := {};
    rv.name := "";
    rv.ast := NIL
@@ -139,6 +144,7 @@ VAR rv: RecordType;
 BEGIN
    NEW(rv);
    rv.kind := KRecord;
+   rv.openArrays := 0;
    rv.flags := {};
    rv.base := NIL;
    rv.fields := NIL
@@ -150,6 +156,7 @@ VAR rv: PointerType;
 BEGIN
    NEW(rv);
    rv.kind := KPointer;
+   rv.openArrays := 0;
    rv.flags := {};
    rv.ty := NIL
    RETURN rv
@@ -160,6 +167,7 @@ VAR rv: ArrayType;
 BEGIN
    NEW(rv);
    rv.kind := KArray;
+   rv.openArrays := 0;
    rv.flags := {};
    rv.ndims := 0;
    rv.ty := NIL
@@ -171,6 +179,7 @@ VAR rv: Type;
 BEGIN
    NEW(rv);
    rv.kind := kind;
+   rv.openArrays := 0;
    rv.flags := {};
    RETURN rv
 END MkPrim;
@@ -244,6 +253,9 @@ BEGIN
    END
 END GetQualName;
 
+(* Can b be assigned to a? *)
+
+
 (* Writes a pretty version of a type to the debug output *)
 PROCEDURE DbgPrint*(t: Type; indent: INTEGER);
 VAR i: INTEGER;
@@ -256,6 +268,9 @@ VAR i: INTEGER;
     proc: ProcType;
 BEGIN
    Dbg.Ind(indent);
+   FOR i := 0 TO t.openArrays-1 DO
+      Dbg.S("ARRAY OF ")
+   END;
    CASE t.kind OF
    KByte: Dbg.S("BYTE")
    |KInteger: Dbg.S("INTEGER")
@@ -310,9 +325,6 @@ BEGIN
             Dbg.S("VAR ")
          END;
          Dbg.S(pfld.name);
-         IF pfld.openArrays > 0 THEN
-            Dbg.S(" ARRAY OF * "); Dbg.I(pfld.openArrays)
-         END;
          Dbg.S(":"); Dbg.Ln;
          DbgPrint(pfld.ty, indent+2);
          pfld := pfld.next

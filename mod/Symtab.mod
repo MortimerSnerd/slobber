@@ -13,6 +13,8 @@ CONST
 
    (* Frame flags *)
    ffModule*=0;                  (* module level frame *)
+   ffProcParams*=1;              (* Separate frame just for proc params *)
+
 
 TYPE   
    (* Possible values for constants *)
@@ -52,6 +54,16 @@ TYPE
       next*: TypeSym
    END;
 
+   (* Iterator that takes care of details of iterating
+      through more than one typesym list *)
+   TSIter* = POINTER TO TSIterDesc;
+   TSIterDesc* = RECORD
+      curframe: Frame;
+      cur: TypeSym;
+      op*: RECORD
+         Next*: PROCEDURE(it: TSIter): TypeSym
+      END
+   END;
 
    (* A frame of variables and constants, types and procedures.  
       They can be linked and searched.  There will be a frame for
@@ -63,7 +75,10 @@ TYPE
       constants*: Constant;
       vars*: TypeSym;
       procedures*: TypeSym;
-      searchNext*: Frame
+      (* The next enclosing scope/frame *)
+      searchNext*: Frame;
+      (* used for the allFrames linked list in Modules *)
+      next: Frame
    END;
 
    (* Record of named items in a module.  It's expected
@@ -82,6 +97,10 @@ TYPE
       frame*: Frame;
          (* Search scope for the module's declarations *)
 
+      (* Linked list along the Frame.next member.  For convenience
+         in iterating all declarations, as the frame's nextSearch
+         links form a tree that's more complicated to traverse *)
+      allFrames*: Frame;
       errs*: ARRAY 16 OF EvalErrDesc;
       nofErrs*: INTEGER
          (* Errors recording while loading the module, or doing
@@ -92,8 +111,10 @@ VAR
    (* fwd decl *)
    CvtStrucType: PROCEDURE(mod: Module; frame: Frame; t: Ast.T; scan: Lex.T; 
                            VAR rv: Ty.Type): EvalError;
+   LoadDecls: PROCEDURE(procDecls: Ast.Branch; rv: Module; frame: Frame; scan: Lex.T);
 
-PROCEDURE MkFrame(chainTo: Frame): Frame;
+
+PROCEDURE MkFrame(owner: Module; chainTo: Frame): Frame;
 VAR rv: Frame;
 BEGIN
    NEW(rv);
@@ -103,6 +124,8 @@ BEGIN
    rv.vars := NIL;
    rv.procedures := NIL;
    rv.searchNext := chainTo;
+   rv.next := owner.allFrames;
+   owner.allFrames := rv;
    RETURN rv
 END MkFrame; 
 
@@ -110,9 +133,10 @@ PROCEDURE MkModule(): Module;
 VAR rv: Module;
 BEGIN
    NEW(rv);
+   rv.allFrames := NIL;
    rv.imports := NIL;
    rv.importNext := NIL;
-   rv.frame := MkFrame(NIL);
+   rv.frame := MkFrame(rv, NIL);
    rv.frame.flags := {ffModule};
    rv.nofErrs := 0;
    RETURN rv
@@ -147,6 +171,29 @@ BEGIN
    END
 END RevTypeSymList;
 
+PROCEDURE IterAllProcs*(mod: Module) : TSIter;
+VAR rv: TSIter;
+   PROCEDURE AllProcNext(it: TSIter): TypeSym;
+   VAR rv: TypeSym;
+   BEGIN
+      IF it.cur = NIL THEN
+         WHILE (it.cur = NIL) & (it.curframe # NIL) DO
+            it.cur := it.curframe.procedures;
+            it.curframe := it.curframe.next
+         END;
+      END;
+      rv := it.cur;
+      IF it.cur # NIL THEN it.cur := it.cur.next END;
+      RETURN rv
+   END AllProcNext;
+BEGIN
+   NEW(rv);
+   rv.curframe := mod.allFrames;
+   rv.cur := NIL;
+   rv.op.Next := AllProcNext;
+   RETURN rv
+END IterAllProcs;
+
 PROCEDURE StringEq(a, b: ARRAY OF CHAR): BOOLEAN;
 VAR rv: BOOLEAN;
     i, alen: INTEGER;
@@ -162,7 +209,7 @@ BEGIN
 END StringEq;
 
 
-PROCEDURE LookupImport*(cur: Module; name: ARRAY OF CHAR): Module;
+PROCEDURE FindImport*(cur: Module; name: ARRAY OF CHAR): Module;
 VAR rv, x: Module;
 BEGIN
    x := cur.imports;
@@ -175,14 +222,14 @@ BEGIN
       END
    END
    RETURN rv
-END LookupImport;
+END FindImport;
 
 PROCEDURE FindConst*(m: Module; frame: Frame; n: Ty.QualName): Constant;
 VAR c: Constant;
     done: BOOLEAN;
 BEGIN
    IF Ty.IsQualified(n) THEN
-      m := LookupImport(m, n.module);
+      m := FindImport(m, n.module);
       IF m # NIL THEN frame := m.frame END;
    END;
    IF m # NIL THEN
@@ -236,7 +283,7 @@ PROCEDURE FindProc*(m: Module; frame: Frame; n: Ty.QualName): TypeSym;
 VAR rv: TypeSym;
 BEGIN
    IF Ty.IsQualified(n) THEN
-      m := LookupImport(m, n.module);
+      m := FindImport(m, n.module);
       IF m # NIL THEN frame := m.frame END
    END;
    rv := NIL;
@@ -251,7 +298,7 @@ PROCEDURE FindType*(m: Module; frame: Frame; n: Ty.QualName): TypeSym;
 VAR rv: TypeSym;
 BEGIN
    IF Ty.IsQualified(n) THEN
-      m := LookupImport(m, n.module);
+      m := FindImport(m, n.module);
       IF m # NIL THEN frame := m.frame END
    END;
    rv := NIL;
@@ -262,29 +309,8 @@ BEGIN
    RETURN rv
 END FindType;
 
-(* Asserts that a given child of a branch is a terminal, and returns it *)
-PROCEDURE TermAt(br: Ast.Branch; i: INTEGER): Ast.Terminal;
-VAR x: Ast.T;
-BEGIN
-   x := Ast.GetChild(br, i);
-   RETURN x(Ast.Terminal)
-END TermAt;
-
-PROCEDURE BranchAt(br: Ast.Branch; i: INTEGER): Ast.Branch;
-VAR x: Ast.T;
-    rv: Ast.Branch;
-BEGIN
-   x := Ast.GetChild(br, i);
-   IF x = NIL THEN
-      rv := NIL
-   ELSE
-      rv := x(Ast.Branch)
-   END
-   RETURN rv
-END BranchAt;
-
-PROCEDURE MkEvalError(msg: ARRAY OF CHAR; scan: Lex.T; 
-                      ast: Ast.T): EvalError;
+PROCEDURE MkEvalError*(msg: ARRAY OF CHAR; scan: Lex.T; 
+                       ast: Ast.T): EvalError;
 VAR rv: EvalError;
     t: Ast.Terminal;
 BEGIN
@@ -361,14 +387,14 @@ BEGIN
       br := expr(Ast.Branch);
       IF br.kind = Ast.BkUnOp THEN
          rv := EvalConstExpr(cur, frame, scan, Ast.GetChild(br, 1), dest);
-         t := TermAt(br, 0);
+         t := Ast.TermAt(br, 0);
          IF (rv = NIL) & (t.tok.kind = Lex.MINUS) THEN
             IF ~Negate(dest) THEN
                rv := MkEvalError("Bad type for negation", scan, t)
             END
          END
       ELSIF br.kind = Ast.BkBinOp THEN
-         op := TermAt(br, 1);
+         op := Ast.TermAt(br, 1);
          rv := EvalConstExpr(cur, frame, scan, Ast.GetChild(br, 0), lhs);
          IF rv = NIL THEN
             rv := EvalConstExpr(cur, frame, scan, Ast.GetChild(br, 2), rhs);
@@ -452,7 +478,7 @@ BEGIN
       rv := fv.ty
    ELSIF ~Ty.IsQualified(qn) THEN
       (* Could be primitive *)
-      term := TermAt(br, 1);
+      term := Ast.TermAt(br, 1);
       tk := Ty.LookupPrimitive(scan, term.tok);
       IF tk # Ty.KTypeError THEN
          rv := Ty.MkPrim(tk)
@@ -475,7 +501,7 @@ VAR err: EvalError;
     i: INTEGER;
 BEGIN
    art := Ty.MkArrayType();
-   dms := BranchAt(br, Ast.ArrayTypeDims);
+   dms := Ast.BranchAt(br, Ast.ArrayTypeDims);
    art.ndims := dms.childLen;
    FOR i := 0 TO art.ndims-1 DO
       x := Ast.GetChild(dms, i);
@@ -514,9 +540,9 @@ BEGIN
    err := NIL;
    i := 1;
    WHILE (err = NIL) & (i <= (formalParams.childLen-1)) DO
-      fpsec := BranchAt(formalParams, i);
-      formalType := BranchAt(fpsec, fpsec.childLen-1);
-      err := CvtStrucType(mod, frame, BranchAt(formalType, 0), 
+      fpsec := Ast.BranchAt(formalParams, i);
+      formalType := Ast.BranchAt(fpsec, fpsec.childLen-1);
+      err := CvtStrucType(mod, frame, Ast.BranchAt(formalType, 0), 
                           scan, paramTy);
       IF err = NIL THEN
          IF Ast.NfVar IN fpsec.flags THEN
@@ -524,10 +550,10 @@ BEGIN
          END;
          FOR j := 0 TO fpsec.childLen-2 DO
             fld := Ty.MkProcParam();
-            name := TermAt(fpsec, j);
+            name := Ast.TermAt(fpsec, j);
             Lex.Extract(scan, name.tok, fld.name);
             fld.ty := paramTy;
-            fld.openArrays := formalType.n;
+            paramTy.openArrays := formalType.n;
             fld.next := paramList;
             paramList := fld
          END
@@ -545,8 +571,8 @@ VAR err: EvalError;
     pt: Ty.ProcType;
 BEGIN
    pt := Ty.MkProcType();
-   formalParams := BranchAt(br, 0);
-   rtype := BranchAt(formalParams, Ast.FormalParamsReturn);
+   formalParams := Ast.BranchAt(br, 0);
+   rtype := Ast.BranchAt(formalParams, Ast.FormalParamsReturn);
    IF rtype # NIL THEN
       err := CvtStrucType(mod, frame, rtype, scan, pt.returnTy)
    END;
@@ -560,27 +586,51 @@ BEGIN
    RETURN err
 END TyCvtProc;
 
+(* Creates a lookup frame containing just procedure parameters.
+   The frame vars aren't necessarily in parameter order. *)
+PROCEDURE FrameForParams(mod: Module; parent: Frame; proc: Ty.ProcType): Frame;
+VAR rv: Frame;
+    param: Ty.ProcParam;
+    ts: TypeSym;
+BEGIN
+   rv := MkFrame(mod, parent);
+   rv.flags := {ffProcParams};
+   param := proc.params;
+   WHILE param # NIL DO
+      ts := MkTypeSym();
+      Strings.Append(param.name, ts.name);
+      ts.ty := param.ty;
+      ts.next := rv.vars;
+      rv.vars := ts;
+      param := param.next
+   END;
+   RETURN rv
+END FrameForParams;
+
 PROCEDURE TyCvtProcDecl(mod: Module; frame: Frame; procDecl: Ast.Branch; scan: Lex.T;
                         VAR rv: Ty.Type): EvalError;
 VAR err: EvalError;
     pty: Ty.ProcType;
-    formalParams, retType: Ast.Branch;
+    formalParams, bodyDecls, retType: Ast.Branch;
 BEGIN
-   (* TODO - once Frames are in place, handle the procedure decls as well *)
    err := NIL;
    pty := Ty.MkProcType();
-   formalParams := BranchAt(procDecl, Ast.ProcedureDeclParams);
-   pty.body := BranchAt(procDecl, Ast.ProcedureDeclBody);
-   retType := BranchAt(formalParams, Ast.FormalParamsReturn);
+   formalParams := Ast.BranchAt(procDecl, Ast.ProcedureDeclParams);
+   pty.body := Ast.BranchAt(procDecl, Ast.ProcedureDeclBody);
+   retType := Ast.BranchAt(formalParams, Ast.FormalParamsReturn);
    IF retType # NIL THEN
       err := CvtStrucType(mod, frame, retType, scan, pty.returnTy)
    END;
    IF err = NIL THEN
-      err := TyCvtFormalParams(mod, frame, formalParams, scan, pty.params)
+      err := TyCvtFormalParams(mod, frame, formalParams, scan, pty.params);
    END;
    IF err = NIL THEN
       Ty.RevProcParam(pty.params);
-      rv := pty
+      rv := pty;
+      bodyDecls := Ast.BranchAt(pty.body, Ast.ProcBodyDecls);
+      IF bodyDecls # NIL THEN
+         LoadDecls(bodyDecls, mod, frame, scan)
+      END
    END;
    RETURN err
 END TyCvtProcDecl; 
@@ -595,7 +645,7 @@ BEGIN
    pt := Ty.MkPointerType();
    err := CvtStrucType(mod, frame, Ast.GetChild(br, 0), scan, pt.ty);
    IF err # NIL THEN
-         Ty.GetQualName(BranchAt(br, 0), scan, qn);
+         Ty.GetQualName(Ast.BranchAt(br, 0), scan, qn);
          IF ~Ty.IsQualified(qn) THEN
             (* If this is not a reference to a type in another module, 
                but another type in this section, defer resolution of the
@@ -629,23 +679,23 @@ VAR err: EvalError;
     fname: Ast.Terminal;
 BEGIN
     rt := Ty.MkRecordType();
-    base := BranchAt(br, Ast.RecordBaseType);
+    base := Ast.BranchAt(br, Ast.RecordBaseType);
     IF base # NIL THEN
       err := CvtStrucType(mod, frame, base, scan, rt.base)
     END;
     IF err = NIL THEN
-      flds := BranchAt(br, Ast.RecordFieldList);
+      flds := Ast.BranchAt(br, Ast.RecordFieldList);
       i := 0;
       WHILE (err = NIL) & (i <= flds.childLen-1) DO
          (* Field list is list of names, and last entry is type *)
-         flist := BranchAt(flds, i);
-         lsty := BranchAt(flist, Ast.FieldListType);
+         flist := Ast.BranchAt(flds, i);
+         lsty := Ast.BranchAt(flist, Ast.FieldListType);
          err := CvtStrucType(mod, frame, lsty, scan, ftype);
          IF err = NIL THEN
-            nmlst := BranchAt(flist, Ast.FieldListIdents);
+            nmlst := Ast.BranchAt(flist, Ast.FieldListIdents);
             FOR j := 0 TO nmlst.childLen-1 DO
                fld := Ty.MkRecordField();
-               fname := TermAt(nmlst, j);
+               fname := Ast.TermAt(nmlst, j);
                Lex.Extract(scan, fname.tok, fld.name);
                fld.ty := ftype;
                fld.next := rt.fields;
@@ -712,7 +762,7 @@ BEGIN
    RETURN rv
 END MkConstant; 
 
-PROCEDURE AddErr(mod: Module; err: EvalError); 
+PROCEDURE AddErr*(mod: Module; err: EvalError); 
 BEGIN
    IF mod.nofErrs < LEN(mod.errs) THEN
       mod.errs[mod.nofErrs] := err^;
@@ -732,13 +782,13 @@ VAR err: EvalError;
     name: Ast.Terminal;
     i: INTEGER;
 BEGIN
-   identList := BranchAt(varDecl, Ast.VarDeclIdents);
-   tyast := BranchAt(varDecl, Ast.VarDeclVal);
+   identList := Ast.BranchAt(varDecl, Ast.VarDeclIdents);
+   tyast := Ast.BranchAt(varDecl, Ast.VarDeclVal);
    err := CvtStrucType(mod, frame, tyast, scan, vtype);
    IF err = NIL THEN
       FOR i := 0 TO identList.childLen-1 DO
          fv := MkTypeSym();
-         name := TermAt(identList, i);
+         name := Ast.TermAt(identList, i);
          Lex.Extract(scan, name.tok, fv.name);
          fv.export := name.export;
          fv.ty := vtype;
@@ -756,7 +806,7 @@ BEGIN
    IF varDeclSeq # NIL THEN
       ASSERT(varDeclSeq.kind = Ast.BkVarDeclSeq);
       FOR i := 0 TO varDeclSeq.childLen-1 DO
-         err := CvtAndLinkVars(rv, frame, BranchAt(varDeclSeq, i), scan, frame.vars);
+         err := CvtAndLinkVars(rv, frame, Ast.BranchAt(varDeclSeq, i), scan, frame.vars);
          IF err # NIL THEN
             AddErr(rv, err)
          END
@@ -776,9 +826,9 @@ BEGIN
    IF consts # NIL THEN
       FOR i := 0 TO consts.childLen-1 DO
          cd := MkConstant();
-         br := BranchAt(consts, i);
+         br := Ast.BranchAt(consts, i);
          ASSERT(br.kind = Ast.BkConstDeclaration);
-         id := TermAt(br, 0);
+         id := Ast.TermAt(br, 0);
          Lex.Extract(scan, id.tok, cd.name);
          cd.exported := id.export;
          err := EvalConstExpr(rv, frame, scan, Ast.GetChild(br, 1), cd.val);
@@ -802,13 +852,19 @@ VAR i: INTEGER;
 BEGIN
    IF procDecls # NIL THEN
       FOR i := 0 TO procDecls.childLen-1 DO
-         procDecl := BranchAt(procDecls, i);
+         procDecl := Ast.BranchAt(procDecls, i);
          ent := MkTypeSym();
-         fname := TermAt(procDecl, Ast.ProcedureDeclName);
+         fname := Ast.TermAt(procDecl, Ast.ProcedureDeclName);
          Lex.Extract(scan, fname.tok, ent.name);
          ent.export := fname.export;
-         err := TyCvtProcDecl(rv, frame, procDecl, scan, ent.ty);
+         (* proc decls get their own frame for their child declarations *) 
+         ent.frame := MkFrame(rv, frame);
+         err := TyCvtProcDecl(rv, ent.frame, procDecl, scan, ent.ty);
          IF err = NIL THEN
+            (* And we link in a separate frame for just the procedure 
+               parameters, for convenience *)
+            ent.frame := FrameForParams(rv, ent.frame, ent.ty(Ty.ProcType));
+            ent.frame.flags := {ffProcParams};
             ent.next := frame.procedures;
             frame.procedures := ent
          ELSE
@@ -858,14 +914,14 @@ BEGIN
    IF types # NIL THEN
       ASSERT(types.kind = Ast.BkTypeDeclSeq);
       FOR i := 0 TO types.childLen-1 DO
-         br := BranchAt(types, i);
+         br := Ast.BranchAt(types, i);
          ASSERT(br.kind = Ast.BkTypeDeclaration);
          ty := MkTypeSym();
          err := CvtStrucType(mod, frame, 
                              Ast.GetChild(br, Ast.TypeDeclVal), scan,
                                           ty.ty);
          IF err = NIL THEN
-            t := TermAt(br, Ast.TypeDeclName);
+            t := Ast.TermAt(br, Ast.TypeDeclName);
             Lex.Extract(scan, t.tok, ty.name);
             ty.export := t.export;
             ty.next := frame.types;
@@ -878,17 +934,17 @@ BEGIN
    END
 END LoadTypes;
 
-PROCEDURE LoadDecls(decls: Ast.Branch; rv: Module; frame: Frame; scan: Lex.T);
+PROCEDURE LoadDeclsImpl(decls: Ast.Branch; rv: Module; frame: Frame; scan: Lex.T);
 BEGIN
    IF decls # NIL THEN
       ASSERT(decls.kind = Ast.BkDeclarationSequence);
-      LoadConsts(BranchAt(decls, Ast.DeclSeqConsts), rv, frame, scan); 
-      LoadTypes(BranchAt(decls, Ast.DeclSeqTypes), rv, frame, scan);
+      LoadConsts(Ast.BranchAt(decls, Ast.DeclSeqConsts), rv, frame, scan); 
+      LoadTypes(Ast.BranchAt(decls, Ast.DeclSeqTypes), rv, frame, scan);
       FixupDeferrals(rv, frame, scan);
-      LoadVars(BranchAt(decls, Ast.DeclSeqVars), rv, frame, scan);
-      LoadProcs(BranchAt(decls, Ast.DeclSeqProcs), rv, frame, scan)
+      LoadVars(Ast.BranchAt(decls, Ast.DeclSeqVars), rv, frame, scan);
+      LoadProcs(Ast.BranchAt(decls, Ast.DeclSeqProcs), rv, frame, scan)
    END
-END LoadDecls;
+END LoadDeclsImpl;
 
 (* Create a Module for the AST version of a Module.   Populates the 
    errs/nofErrs fields of the module if there's errors *)
@@ -900,16 +956,17 @@ BEGIN
    rv := MkModule();
    mod := ast(Ast.Branch);
    ASSERT(mod.kind = Ast.BkModule);
-   term := TermAt(mod, Ast.ModuleName);
+   term := Ast.TermAt(mod, Ast.ModuleName);
    Lex.Extract(scan, term.tok, rv.name);
-   LoadImports(BranchAt(mod, Ast.ModuleImports), rv, scan);
+   LoadImports(Ast.BranchAt(mod, Ast.ModuleImports), rv, scan);
    IF rv.nofErrs = 0 THEN
-      LoadDecls(BranchAt(mod, Ast.ModuleDecls), rv, rv.frame, scan)
+      LoadDecls(Ast.BranchAt(mod, Ast.ModuleDecls), rv, rv.frame, scan)
    END;
 
    RETURN rv   
 END BuildModule;
 
 BEGIN
-   CvtStrucType := CvtStrucTypeImpl
+   CvtStrucType := CvtStrucTypeImpl;
+   LoadDecls := LoadDeclsImpl;
 END Symtab.

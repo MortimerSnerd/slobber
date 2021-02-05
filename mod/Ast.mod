@@ -32,6 +32,7 @@ CONST
    ImportAlias* = 0; ImportModule*=1;
    DeclSeqConsts*=0; DeclSeqTypes*=1; DeclSeqVars*=2;DeclSeqProcs*=3;
    ConstDeclName*=0; ConstDeclVal*=1;
+   DesignatorQIdent*=0;DesignatorSelectors*=1;
    TypeDeclName*=0; TypeDeclVal*=1;
    RecordBaseType*=0;RecordFieldList*=1;
    FieldListIdents*=0; FieldListType*=1;
@@ -588,6 +589,55 @@ BEGIN
    rv := cb.chld[i - cb.startIx];
    RETURN rv
 END GetChild;
+
+(* Inserts an item into the children at the given position *)
+(* a b c d  *)
+PROCEDURE InsertChild*(b: Branch; ix: INTEGER; v: T);
+VAR i: INTEGER;
+BEGIN
+   IF ix = b.childLen THEN
+      AddChild(b, v)
+   ELSIF ix > b.childLen THEN
+      SetChild(b, ix, v)
+   ELSE
+      (* This is dire, but all I have the brainpower for right now *)
+      FOR i := b.childLen-1 TO ix BY -1 DO
+         SetChild(b, i+1, GetChild(b, i))
+      END;
+      SetChild(b, ix, v);
+      INC(b.childLen)
+   END
+END InsertChild;
+
+(* Removes the last item, without returning it *)
+PROCEDURE DropLast*(b: Branch); 
+BEGIN
+   IF b.childLen > 0 THEN
+      DEC(b.childLen)
+   END
+END DropLast;
+
+(* Asserts that a given child of a branch is a terminal, and returns it *)
+PROCEDURE TermAt*(br: Branch; i: INTEGER): Terminal;
+VAR x: T;
+BEGIN
+   x := GetChild(br, i);
+   RETURN x(Terminal)
+END TermAt;
+
+(* Asserts that the given child of a branch is a branch, and returns it *)
+PROCEDURE BranchAt*(br: Branch; i: INTEGER): Branch;
+VAR x: T;
+    rv: Branch;
+BEGIN
+   x := GetChild(br, i);
+   IF x = NIL THEN
+      rv := NIL
+   ELSE
+      rv := x(Branch)
+   END
+   RETURN rv
+END BranchAt;
 
 PROCEDURE DefToStr(n: T; src: ARRAY OF CHAR; indent: INTEGER);
 BEGIN

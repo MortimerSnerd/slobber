@@ -177,3 +177,21 @@ For procedures, this pass just fills out the symbol
 tables with the declarations.  After that, there's
 enough information to do semantic checking on the 
 procedure and module bodies.
+
+### 2/4/21
+
+We build the symbol table now, minus import loading.
+Added a bare minimum semcheck module that is using
+the type information to fix up ambiguities in the
+AST.
+
+Doing the symbol table separate and fixing up the tree 
+later is a lot more work than doing it at the same time
+of the parse.  I don't regret it. It makes loosening the
+declaration order dependencies easier later.  But it does 
+make me appreciate the succinctness of the Oberon
+compiler from the N. Wirth compiler all the more.
+
+Need to do more cleanup, and actually start doing
+type and semantic checking.
+
