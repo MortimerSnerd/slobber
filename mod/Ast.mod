@@ -39,6 +39,7 @@ CONST
    QualIdentModule*=0; QualIdentName*=1;
    ArrayTypeDims*=0;ArrayTypeType*=1;
    VarDeclIdents*=0;VarDeclVal*=1;
+   CallDesignator*=0;CallParams*=1;
    FormalParamsReturn*=0;FormalParamsStart*=1;
    ProcedureDeclName*=0;ProcedureDeclParams*=1;ProcedureDeclBody*=2;
    ProcBodyDecls*=0; ProcBodyStmts*=1;ProcBodyReturn*=2;
@@ -55,6 +56,14 @@ TYPE
    (* Root node of a tree *)
    T* = POINTER TO TreeDesc;
 
+   (* Base class for annotations that other modules can add
+      to tree nodes *)
+   Annotation* = POINTER TO AnnotationDesc;
+   AnnotationDesc* = RECORD
+      (* Kept in a list on the AST nodes *)
+      anext*: Annotation
+   END;
+
    SourcePos* = RECORD
       line*, col*, seek*: INTEGER
    END;
@@ -66,7 +75,8 @@ TYPE
    TreeDesc* = RECORD
       ops*: NodeOps;
       n*: INTEGER; (* used by small number of nodes *)
-      flags*: SET
+      flags*: SET;
+      notes*: Annotation
    END;
 
    Terminal* = POINTER TO TerminalDesc;
@@ -88,6 +98,19 @@ TYPE
       chld*: ARRAY BranchChunkSz OF T;
       next, last: Branch
    END;
+
+   (* Common error message type for syntax and semantic errors *)
+   SrcError* = POINTER TO SrcErrorDesc;
+   SrcErrorDesc* = RECORD
+      msg*: ARRAY 128 OF CHAR;
+      pos*: SourcePos
+   END;
+
+   CaseIterator* = RECORD
+      cases, lablist: Branch;
+      caseIx, labIx: INTEGER
+   END;
+
 
  VAR
    (* the joy of manual vtables *)
@@ -537,6 +560,12 @@ BEGIN
    RETURN rv
 END MkParenExpr;
 
+PROCEDURE Note*(t: T; note: Annotation); 
+BEGIN
+   note.anext := t.notes;
+   t.notes := note
+END Note;
+
 (* Returns the Branch item i would go into, adding chunks
    to get there if necessary. *)
 PROCEDURE BranchForIndex(b: Branch; i: INTEGER): Branch;
@@ -620,9 +649,15 @@ END DropLast;
 (* Asserts that a given child of a branch is a terminal, and returns it *)
 PROCEDURE TermAt*(br: Branch; i: INTEGER): Terminal;
 VAR x: T;
+    rv: Terminal;
 BEGIN
    x := GetChild(br, i);
-   RETURN x(Terminal)
+   IF x # NIL THEN
+      rv := x(Terminal)
+   ELSE
+      rv := NIL
+   END
+   RETURN rv
 END TermAt;
 
 (* Asserts that the given child of a branch is a branch, and returns it *)
@@ -685,6 +720,9 @@ END BranchToStr;
 
 (* Returns the best guess for the line number and colum of a construct.
    Sets .line = -1 if no source position was found. *)
+(* TODO - we need to just put a SourcePos in some of the nodes.
+          this doesn't give a position back for corner cases, 
+          like an empty procedure body with just a return statement *)
 PROCEDURE Position*(t: T; scan: Lex.T; VAR pos: SourcePos);
    PROCEDURE Walk(t: T; scan: Lex.T; VAR pos: SourcePos): BOOLEAN;
    VAR found: BOOLEAN;
@@ -715,6 +753,34 @@ BEGIN
    IF ~Walk(t, scan, pos) THEN pos.line := -1 END
 END Position;
 
+PROCEDURE MkSrcError*(msg: ARRAY OF CHAR; scan: Lex.T; 
+                       ast: T): SrcError;
+VAR rv: SrcError;
+    t: Terminal;
+BEGIN
+   NEW(rv);
+   rv.msg := msg;
+   IF ast IS Terminal THEN 
+      t := ast(Terminal);
+      rv.pos.line := Lex.LineForPos(scan, t.tok.start);
+      rv.pos.col := Lex.ColForPos(scan, t.tok.start);
+      rv.pos.seek := t.tok.start
+   ELSE 
+      Position(ast, scan, rv.pos)
+   END
+   RETURN rv
+END MkSrcError;
+
+(* Writes the error out to the console *)
+PROCEDURE Announce*(ee: SrcErrorDesc; file: ARRAY OF CHAR);
+BEGIN
+   Dbg.S(file); 
+   Dbg.S("(");Dbg.I(ee.pos.line);Dbg.S(",");Dbg.I(ee.pos.col);Dbg.S(")");
+   Dbg.S(": error: "); Dbg.S(ee.msg);
+   Dbg.Ln
+END Announce;
+
+
 
 (* Finds the first child branch of t that has the
    kind of bKind.  Returns NIL if none found *)
@@ -737,6 +803,55 @@ BEGIN
    END;
    RETURN rv
 END FindBranch;
+
+PROCEDURE StringEq*(a, b: ARRAY OF CHAR): BOOLEAN;
+VAR rv: BOOLEAN;
+    i, alen: INTEGER;
+BEGIN
+   rv := TRUE;
+   i := 0;
+   alen := Strings.Length(a);
+   WHILE rv & (i <= alen) DO  (* Include 0X, not prefix matching here *)
+      IF a[i] # b[i] THEN rv := FALSE
+      ELSE INC(i) END
+   END;
+   RETURN rv
+END StringEq;
+
+PROCEDURE IterateCases*(VAR ci: CaseIterator; caseStmt: Branch);
+BEGIN
+   ci.cases := caseStmt;
+   ci.lablist := NIL;
+   ci.caseIx := CaseStmtCases;
+   ci.labIx := 0
+END IterateCases;
+
+PROCEDURE HasAnotherCase*(ci: CaseIterator): BOOLEAN;
+   RETURN ci.caseIx < ci.cases.childLen
+END HasAnotherCase;
+
+PROCEDURE HasAnotherLabelRange*(ci: CaseIterator): BOOLEAN;
+BEGIN
+   RETURN ci.labIx < ci.lablist.childLen
+END HasAnotherLabelRange;
+
+PROCEDURE NextCase*(VAR ci: CaseIterator): Branch;
+VAR rv: Branch;
+BEGIN
+   rv := BranchAt(ci.cases, ci.caseIx);
+   ci.lablist := BranchAt(BranchAt(ci.cases, ci.caseIx), CaseLabelList);
+   INC(ci.caseIx);
+   ci.labIx := 0;
+   RETURN rv
+END NextCase;
+
+PROCEDURE NextLabelRange*(VAR ci: CaseIterator): Branch;
+VAR rv: Branch;
+BEGIN
+   rv := BranchAt(ci.lablist, ci.labIx);
+   INC(ci.labIx);
+   RETURN rv
+END NextLabelRange;
 
 PROCEDURE SetupBranchNames();
 VAR i: INTEGER;

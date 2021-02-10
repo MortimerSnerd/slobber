@@ -1,15 +1,8 @@
 MODULE TestSymtab;
 IMPORT
-   Ast, Dbg, Par:=Parser, Semcheck, Symtab, Ty:=Types;
+   Ast, BinReader, BinWriter, Dbg, In, Par:=Parser, 
+   Semcheck, Symtab, Ty:=Types;
 VAR
-   buf: ARRAY 356 OF CHAR;
-   par: Par.T;
-   ast: Ast.T;
-   mod: Symtab.Module;
-   i: INTEGER;
-   cc: Symtab.Constant;
-   qn: Ty.QualName;
-   scstate: Semcheck.State;
    DbgPrintFrame: PROCEDURE(frame: Symtab.Frame; indent: INTEGER; 
                             showProcFrame: BOOLEAN);
 
@@ -52,31 +45,72 @@ BEGIN
    Section("*** PROCEDURES", frame.procedures, indent, TRUE);
 END DbgPrintFrameImpl;
 
+PROCEDURE CheckTypeWriting(mod: Symtab.Module);
+VAR ts: Symtab.TypeSym;
+    rd: BinReader.T;
+    wr: BinWriter.T;
+    nty: Ty.Type;
+    fname: ARRAY 128 OF CHAR;
+BEGIN
+   fname := "/tmp/tytest.bin";
+   ts := mod.frame.types;
+   WHILE ts # NIL DO
+      IF BinWriter.Init(wr, fname) THEN
+         Ty.Write(wr, ts.ty);
+         BinWriter.Finish(wr);
+         IF BinReader.Init(rd, fname) THEN
+            nty := Ty.Read(rd);
+            BinReader.Finish(rd);
+            IF ~Ty.Equal(ts.ty, nty) THEN
+               Dbg.S("error: type not equal for ");
+               Dbg.S(ts.name); Dbg.Ln
+            END;
+         ELSE
+            Dbg.Ln;
+            Dbg.S("Error: could not open type file for reading");
+            Dbg.Ln
+         END
+      ELSE
+         Dbg.Ln;
+         Dbg.S("Error: could not open type file for reading");
+         Dbg.Ln
+      END;
+      ts := ts.next
+   END
+END CheckTypeWriting;
+
+PROCEDURE TestFiles();
+VAR fname: ARRAY 1024 OF CHAR;
+   par: Par.T;
+   ast: Ast.T;
+   mod: Symtab.Module;
+   scstate: Semcheck.State;
+   i: INTEGER;
+BEGIN
+   REPEAT
+      In.Line(fname);
+      IF fname[0] # 0X THEN
+         Dbg.S("Checking "); Dbg.S(fname);Dbg.S("..."); 
+         par := Par.NewFromFile(fname);
+         ast := Par.ParseModule(par);
+         mod := Symtab.BuildModule(ast, par.scan);
+         CheckTypeWriting(mod);
+         Semcheck.Init(scstate, mod, par.scan);
+         IF Semcheck.Run(scstate) THEN
+            Dbg.S("Done")
+         ELSE
+            Dbg.S("Failed");
+         END;
+         Dbg.Ln;
+         FOR i := 0 TO mod.nofErrs-1 DO
+            Ast.Announce(mod.errs[i], par.curFile)
+         END
+      END
+   UNTIL fname[0] = 0X;
+END TestFiles;
+   
+
 BEGIN
    DbgPrintFrame := DbgPrintFrameImpl;
-   par := Par.NewFromFile("../test/files/Borb.mod");
-   ast := Par.ParseModule(par);
-
-   mod := Symtab.BuildModule(ast, par.scan);
-   Dbg.S("DONE "); Dbg.S(mod.name); Dbg.Ln; Dbg.S(" numerrs: "); Dbg.I(mod.nofErrs); 
-   Dbg.Ln;
-
-   Semcheck.Init(scstate, mod, par.scan);
-   IF Semcheck.RunPass0(scstate) THEN
-      ast.ops.toStr(ast, par.scan.buf, 0);
-      qn.module := "";
-      qn.name := "x";
-      cc := Symtab.FindConst(mod, mod.frame, qn);
-      IF cc # NIL THEN
-         Dbg.S("X = "); Dbg.I(cc.val.ival); Dbg.Ln
-      END;
-
-      DbgPrintFrame(mod.frame, 0, TRUE);
-      Dbg.Ln
-   ELSE
-      Dbg.S("Semcheck does not love you");Dbg.Ln;
-   END;
-   FOR i := 0 TO mod.nofErrs-1 DO
-      Symtab.Announce(mod.errs[i], par.curFile)
-   END;
+   TestFiles;
 END TestSymtab.

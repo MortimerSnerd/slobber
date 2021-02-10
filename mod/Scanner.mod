@@ -29,6 +29,9 @@ CONST
     KUNTIL* = 63; KVAR* = 64; KWHILE* = 65;
     NumTok=67;
 
+    (* Flags for tokens *)
+    tfRelational*=0;
+
     CR=0DX; LF=0AX; TAB=9X; DQUOT=22X;
 
 TYPE
@@ -57,6 +60,10 @@ TYPE
 VAR
    (* Lookup table from token number to a string *)
    TokenNames*: ARRAY NumTok OF ARRAY 32 OF CHAR;
+   TokenFlags*: ARRAY NumTok OF SET;
+
+   (* Tmp var used by SetupFlags *)
+   CurFlag: INTEGER;
 
 PROCEDURE ColForPos*(p:T; pos: INTEGER): INTEGER;
 VAR rv, i: INTEGER;
@@ -563,6 +570,22 @@ BEGIN
    RETURN scan.cur.kind
 END Next;
 
+PROCEDURE SetupFlags();
+VAR i: INTEGER;
+   PROCEDURE Af(i: INTEGER);
+   BEGIN
+      INCL(TokenFlags[i], CurFlag)
+   END Af;
+BEGIN
+   FOR i := 0 TO NumTok-1 DO
+      TokenFlags[i] := {}
+   END;
+
+   CurFlag := tfRelational;
+   Af(EQ); Af(OCTOTHORPE); Af(LT); Af(LTE); Af(GT); Af(GTE);
+   Af(KIN); Af(KIS)
+END SetupFlags;
+
 BEGIN
    TokenNames[EOF] := "EOF"; 
    TokenNames[GARBAGE] := "GARBAGE6"; 
@@ -630,7 +653,9 @@ BEGIN
    TokenNames[KTYPE] := "KTYPE";
    TokenNames[KUNTIL] := "KUNTIL";
    TokenNames[KVAR] := "KVAR";
-   TokenNames[KWHILE] := "KWHILE"
+   TokenNames[KWHILE] := "KWHILE";
+   SetupFlags()
+   
 END Scanner.
 
 

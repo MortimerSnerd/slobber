@@ -151,6 +151,18 @@ BEGIN
    RETURN rv
 END Accept;
 
+PROCEDURE AcceptFlagged(VAR p: T; tokFlag: INTEGER): BOOLEAN;
+VAR rv: BOOLEAN;
+BEGIN
+   IF tokFlag IN Lex.TokenFlags[p.scan.cur.kind] THEN
+      rv := TRUE;
+      Discard(Lex.Next(p.scan))
+   ELSE
+      rv := FALSE
+   END
+   RETURN rv
+END AcceptFlagged;
+
 PROCEDURE AcceptOrFail(VAR p: T; t: Lex.TokKind): BOOLEAN;
 VAR buf: ARRAY 128 OF CHAR;
     rv: BOOLEAN;
@@ -1054,21 +1066,13 @@ BEGIN
    RETURN rv
 END ParseSimpleExpression;
 
-(* "=" | "#" | "<" | "<=" | ">" | ">=" | IN | IS *)
-PROCEDURE AcceptRelation(VAR p: T): BOOLEAN;
-BEGIN
-   RETURN Accept(p, Lex.EQ) OR Accept(p, Lex.OCTOTHORPE) OR Accept(p, Lex.LT)
-          OR Accept(p, Lex.LTE) OR Accept(p, Lex.GT) OR Accept(p, Lex.GTE) 
-          OR Accept(p, Lex.KIN) OR Accept(p, Lex.KIS)
-END AcceptRelation;
-
 (* SimpleExpression [relation SimpleExpression] *)
 PROCEDURE ParseExpressionImpl(VAR p: T): Ast.T;
 VAR rv: Ast.T;
     b: Ast.Branch;
 BEGIN
    rv := ParseSimpleExpression(p);
-   IF AcceptRelation(p) THEN
+   IF AcceptFlagged(p, Lex.tfRelational) THEN
       b := Ast.MkBinOp();
       Ast.AddChild(b, rv); 
       Ast.AddChild(b, Ast.MkTerminal(p.scan.prev));

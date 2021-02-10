@@ -1,0 +1,25 @@
+(* Stub module used to generate symbol table entries for the 
+   builtin functions supplied by Oberon.  *)
+MODULE Globals;
+
+PROCEDURE INC*(VAR i: INTEGER);
+BEGIN END INC;
+
+PROCEDURE DEC*(VAR i: INTEGER);
+BEGIN END DEC;
+
+PROCEDURE ASSERT*(b: BOOLEAN);
+BEGIN END ASSERT;
+
+PROCEDURE LEN*(a: ARRAY OF ANY): INTEGER;
+BEGIN RETURN 0 END LEN;
+
+PROCEDURE CHR*(i: INTEGER): CHAR;
+VAR c: CHAR;
+RETURN c END CHR;
+
+PROCEDURE ORD*(c: CHAR): INTEGER;
+BEGIN RETURN 0 END ORD;
+
+BEGIN
+END Globals.

@@ -1,7 +1,8 @@
 (* Symbol table.  Largely a placeholder at the moment *)
 MODULE Symtab;
 IMPORT
-   Ast, Cvt:=extConvert, Dbg, Lex:=Scanner, Strings, Ty:=Types;
+   Ast, BinReader, BinWriter, Config, Cvt:=extConvert, Dbg, Lex:=Scanner, 
+   Path, Strings, SYSTEM, Ty:=Types;
 
 CONST
    MaxNameLen=64;
@@ -14,6 +15,12 @@ CONST
    (* Frame flags *)
    ffModule*=0;                  (* module level frame *)
    ffProcParams*=1;              (* Separate frame just for proc params *)
+
+   (* TypeSym kinds *)
+   tsVar*=0; tsProc*=1; tsType*=2; tsProcParam*=3;
+
+   (* Version for symtab files *)
+   SymtabVer=50H; FrameMagic=46H;
 
 
 TYPE   
@@ -28,12 +35,6 @@ TYPE
       byval*: BYTE
    END;
 
-   EvalError* = POINTER TO EvalErrDesc;
-   EvalErrDesc* = RECORD
-      msg*: ARRAY 128 OF CHAR;
-      pos*: Ast.SourcePos
-   END;
-
    Constant* = POINTER TO ConstantDesc;
    ConstantDesc* = RECORD
       name*: ARRAY MaxNameLen OF CHAR;
@@ -46,6 +47,7 @@ TYPE
    TypeSym* = POINTER TO TypeSymDesc;
    Frame* = POINTER TO FrameDesc;
    TypeSymDesc* = RECORD
+      kind*: INTEGER;  (* ts* constants *)
       name*: ARRAY MaxNameLen OF CHAR;
       ty*: Ty.Type;
       export*: BOOLEAN;
@@ -97,11 +99,17 @@ TYPE
       frame*: Frame;
          (* Search scope for the module's declarations *)
 
+      initBlock*: Frame;
+         (* Special frame that just has a procedure for the init block
+            of the module.  Can be nil if there is no init code.  Added
+            as a frame, so this fake function will be seen when iterating
+            through the module procs. *)
+
       (* Linked list along the Frame.next member.  For convenience
          in iterating all declarations, as the frame's nextSearch
          links form a tree that's more complicated to traverse *)
       allFrames*: Frame;
-      errs*: ARRAY 16 OF EvalErrDesc;
+      errs*: ARRAY 16 OF Ast.SrcErrorDesc;
       nofErrs*: INTEGER
          (* Errors recording while loading the module, or doing
             semantic checking *)
@@ -110,9 +118,13 @@ TYPE
 VAR
    (* fwd decl *)
    CvtStrucType: PROCEDURE(mod: Module; frame: Frame; t: Ast.T; scan: Lex.T; 
-                           VAR rv: Ty.Type): EvalError;
+                           VAR rv: Ty.Type): Ast.SrcError;
    LoadDecls: PROCEDURE(procDecls: Ast.Branch; rv: Module; frame: Frame; scan: Lex.T);
+   FileMagic: ARRAY 5 OF CHAR;
 
+   (* Symtab for builtin functions that are globally available. Should
+      only have procedures *)
+   Builtins: Module;
 
 PROCEDURE MkFrame(owner: Module; chainTo: Frame): Frame;
 VAR rv: Frame;
@@ -136,16 +148,18 @@ BEGIN
    rv.allFrames := NIL;
    rv.imports := NIL;
    rv.importNext := NIL;
+   rv.initBlock := NIL;
    rv.frame := MkFrame(rv, NIL);
    rv.frame.flags := {ffModule};
    rv.nofErrs := 0;
    RETURN rv
 END MkModule;
 
-PROCEDURE MkTypeSym(): TypeSym;
+PROCEDURE MkTypeSym(kind: INTEGER): TypeSym;
 VAR rv: TypeSym;
 BEGIN
    NEW(rv);
+   rv.kind := kind;
    rv.name := "";
    rv.ty := NIL;
    rv.export := FALSE;
@@ -194,20 +208,6 @@ BEGIN
    RETURN rv
 END IterAllProcs;
 
-PROCEDURE StringEq(a, b: ARRAY OF CHAR): BOOLEAN;
-VAR rv: BOOLEAN;
-    i, alen: INTEGER;
-BEGIN
-   rv := TRUE;
-   i := 0;
-   alen := Strings.Length(a);
-   WHILE rv & (i <= alen) DO  (* Include 0X, not prefix matching here *)
-      IF a[i] # b[i] THEN rv := FALSE
-      ELSE INC(i) END
-   END;
-   RETURN rv
-END StringEq;
-
 
 PROCEDURE FindImport*(cur: Module; name: ARRAY OF CHAR): Module;
 VAR rv, x: Module;
@@ -215,7 +215,7 @@ BEGIN
    x := cur.imports;
    rv := NIL;
    WHILE (rv = NIL) & (x # NIL) DO
-      IF StringEq(name, x.name) THEN
+      IF Ast.StringEq(name, x.name) THEN
          rv := x
       ELSE
          x := x.importNext
@@ -237,7 +237,7 @@ BEGIN
       WHILE ~done & (frame # NIL) DO
          c := frame.constants;
          WHILE ~done & (c # NIL) DO
-            IF StringEq(c.name, n.name) THEN
+            IF Ast.StringEq(c.name, n.name) THEN
                done := TRUE
             ELSE
                c := c.next
@@ -270,7 +270,7 @@ VAR done: BOOLEAN;
 BEGIN
    done := FALSE;
    WHILE ~done & (rv # NIL) DO
-      IF StringEq(rv.name, name) THEN
+      IF Ast.StringEq(rv.name, name) THEN
          done := TRUE
       ELSE
          rv := rv.next
@@ -309,36 +309,46 @@ BEGIN
    RETURN rv
 END FindType;
 
-PROCEDURE MkEvalError*(msg: ARRAY OF CHAR; scan: Lex.T; 
-                       ast: Ast.T): EvalError;
-VAR rv: EvalError;
-    t: Ast.Terminal;
+(* Find a var, and if found, also returns the frame it 
+   was found in *)
+PROCEDURE FindVarLoc*(m: Module; frame: Frame; n: Ty.QualName; 
+                      VAR foundIn: Frame): TypeSym; 
+VAR rv: TypeSym;
 BEGIN
-   NEW(rv);
-   rv.msg := msg;
-   IF ast IS Ast.Terminal THEN 
-      t := ast(Ast.Terminal);
-      rv.pos.line := Lex.LineForPos(scan, t.tok.start);
-      rv.pos.col := Lex.ColForPos(scan, t.tok.start);
-      rv.pos.seek := t.tok.start
-   ELSE 
-      Ast.Position(ast, scan, rv.pos)
-   END
+   IF Ty.IsQualified(n) THEN
+      m := FindImport(m, n.module);
+      IF m # NIL THEN frame := m.frame END
+   END;
+   rv := NIL;
+   WHILE (frame # NIL) & (rv = NIL) DO
+      rv := FindTypeSym(frame.vars, n.name);
+      IF rv # NIL THEN foundIn := frame END;
+      frame := frame.searchNext
+   END;
    RETURN rv
-END MkEvalError;
+END FindVarLoc;
 
-(* Writes the error out to the console *)
-PROCEDURE Announce*(ee: EvalErrDesc; file: ARRAY OF CHAR);
+PROCEDURE FindVar*(m: Module; frame: Frame; n: Ty.QualName): TypeSym;
+VAR ignore: Frame;
 BEGIN
-   Dbg.S(file); 
-   Dbg.S("(");Dbg.I(ee.pos.line);Dbg.S(",");Dbg.I(ee.pos.col);Dbg.S(")");
-   Dbg.S(": error: "); Dbg.S(ee.msg);
-   Dbg.Ln
-END Announce;
+   RETURN FindVarLoc(m, frame, n, ignore)
+END FindVar;
 
-PROCEDURE EvalTerminal(cur: Module; scan: Lex.T; t: Ast.Terminal; 
-                       VAR dest: ConstVal): EvalError;
-VAR rv: EvalError;
+
+(* Returns a typesym assoctiated with the name "n".  Could be
+   a type, procedure or var. *)
+PROCEDURE FindAny*(m: Module; scope: Frame; n: Ty.QualName): TypeSym;
+VAR rv: TypeSym;
+BEGIN
+   rv := FindType(m, scope, n);
+   IF rv = NIL THEN rv := FindProc(m, scope, n) END;
+   IF rv = NIL THEN rv := FindVar(m, scope, n) END
+   RETURN rv
+END FindAny;
+
+PROCEDURE EvalTerminal*(cur: Module; scan: Lex.T; t: Ast.Terminal; 
+                       VAR dest: ConstVal): Ast.SrcError;
+VAR rv: Ast.SrcError;
     buf: ARRAY 64 OF CHAR;
 BEGIN
    rv := NIL;
@@ -348,10 +358,29 @@ BEGIN
       IF dest.bval THEN
          dest.kind := KInteger
       ELSE
-         rv := MkEvalError("Could not parse int literal", scan, t)
+         rv := Ast.MkSrcError("Could not parse int literal", scan, t)
       END
+   ELSIF (t.tok.kind = Lex.ConstString) & (t.tok.len = 3) THEN
+      (* Single char strings are treated as character literals *)
+      dest.cval := scan.buf[t.tok.start+1];
+      dest.kind := KChar;
+   ELSIF t.tok.kind = Lex.ConstHexString THEN
+      (* A character constant in hex. *) 
+      Lex.Extract(scan, t.tok, buf);
+      buf[t.tok.len-1] := "H";  (* Replace X so StringToInt recognizes as hex *)
+      Cvt.StringToInt(buf, dest.ival, dest.bval);
+      IF dest.bval THEN
+         IF (dest.ival < 0) OR (dest.ival > 255) THEN
+            rv := Ast.MkSrcError("Char literal out of range.", scan, t)
+         ELSE
+            dest.cval := CHR(dest.ival);
+            dest.kind := KChar;
+         END
+      ELSE
+         rv := Ast.MkSrcError("Could not parse hex char literal", scan, t)
+      END      
    ELSE
-      rv := MkEvalError("Unrecognized constant value", scan, t)
+      rv := Ast.MkSrcError("Unrecognized constant value", scan, t)
    END
 
    RETURN rv
@@ -372,8 +401,8 @@ BEGIN
 END Negate;
 
 PROCEDURE EvalConstExpr*(cur: Module; frame: Frame; scan: Lex.T; expr: Ast.T; 
-                         VAR dest: ConstVal): EvalError;
-VAR rv: EvalError;
+                         VAR dest: ConstVal): Ast.SrcError;
+VAR rv: Ast.SrcError;
     t, op: Ast.Terminal;
     any: Ast.T;
     br: Ast.Branch;
@@ -390,7 +419,7 @@ BEGIN
          t := Ast.TermAt(br, 0);
          IF (rv = NIL) & (t.tok.kind = Lex.MINUS) THEN
             IF ~Negate(dest) THEN
-               rv := MkEvalError("Bad type for negation", scan, t)
+               rv := Ast.MkSrcError("Bad type for negation", scan, t)
             END
          END
       ELSIF br.kind = Ast.BkBinOp THEN
@@ -400,7 +429,7 @@ BEGIN
             rv := EvalConstExpr(cur, frame, scan, Ast.GetChild(br, 2), rhs);
             IF rv = NIL THEN
                IF lhs.kind # rhs.kind THEN
-                  rv := MkEvalError("Mismatched binary operand types.", scan, 
+                  rv := Ast.MkSrcError("Mismatched binary operand types.", scan, 
                                     op)
                ELSE
                   IF op.tok.kind = Lex.PLUS THEN
@@ -414,7 +443,7 @@ BEGIN
                      ELSIF lhs.kind = KByte THEN
                         dest.byval := dest.byval + rhs.byval
                      ELSE
-                        rv := MkEvalError("+ not defined for types", scan, op)
+                        rv := Ast.MkSrcError("+ not defined for types", scan, op)
                      END
                   ELSIF op.tok.kind = Lex.MINUS THEN
                      dest := lhs;
@@ -427,7 +456,7 @@ BEGIN
                      ELSIF lhs.kind = KByte THEN
                         dest.byval := dest.byval - rhs.byval
                      ELSE
-                        rv := MkEvalError("- not defined for types", scan, op)
+                        rv := Ast.MkSrcError("- not defined for types", scan, op)
                      END     
                   ELSIF op.tok.kind = Lex.ASTERISK THEN
                      dest := lhs;
@@ -440,10 +469,10 @@ BEGIN
                      ELSIF lhs.kind = KByte THEN
                         dest.byval := dest.byval * rhs.byval
                      ELSE
-                        rv := MkEvalError("* not defined for types", scan, op)
+                        rv := Ast.MkSrcError("* not defined for types", scan, op)
                      END     
                   ELSE
-                     rv := MkEvalError("Unrecognized binary op", scan, op)
+                     rv := Ast.MkSrcError("Unrecognized binary op", scan, op)
                   END
                END
             END
@@ -452,10 +481,16 @@ BEGIN
          Ty.GetQualName(br, scan, qname);
          IF ~LookupConst(cur, frame, qname, dest) THEN
             any := Ast.GetChild(br, 1);
-            rv := MkEvalError("Unknown constant", scan, any(Ast.Terminal))
+            rv := Ast.MkSrcError("Unknown constant", scan, any(Ast.Terminal))
+         END
+      ELSIF br.kind = Ast.BkDesignator THEN
+         IF br.childLen = 1 THEN
+            rv := EvalConstExpr(cur, frame, scan, Ast.GetChild(br, 0), dest);
+         ELSE
+            rv := Ast.MkSrcError("Can not evaluate as const expression", scan, br)
          END
       ELSE
-         rv := MkEvalError("Unrecognized constant value", scan, br)
+         rv := Ast.MkSrcError("Unrecognized constant value", scan, br)
       END
    ELSE
       ASSERT(FALSE)
@@ -464,8 +499,8 @@ BEGIN
 END EvalConstExpr;
 
 PROCEDURE TyCvtQualIdent(mod: Module; frame: Frame; br: Ast.Branch; scan: Lex.T; 
-                         VAR rv: Ty.Type): EvalError;
-VAR err: EvalError;
+                         VAR rv: Ty.Type): Ast.SrcError;
+VAR err: Ast.SrcError;
     qn: Ty.QualName;
     fv: TypeSym;
     tk: INTEGER;
@@ -483,17 +518,17 @@ BEGIN
       IF tk # Ty.KTypeError THEN
          rv := Ty.MkPrim(tk)
       ELSE
-         err := MkEvalError("Could not find type", scan, br)
+         err := Ast.MkSrcError("Could not find type", scan, br)
       END
    ELSE
-      err := MkEvalError("Could not find type in imported module", scan, br)
+      err := Ast.MkSrcError("Could not find type in imported module", scan, br)
    END
    RETURN err
 END TyCvtQualIdent;
 
 PROCEDURE TyCvtArrayType(mod: Module; frame: Frame; br: Ast.Branch; scan: Lex.T; 
-                         VAR rv: Ty.Type): EvalError;
-VAR err: EvalError;
+                         VAR rv: Ty.Type): Ast.SrcError;
+VAR err: Ast.SrcError;
     art: Ty.ArrayType;
     cv: ConstVal;
     dms: Ast.Branch;
@@ -510,7 +545,7 @@ BEGIN
          IF cv.kind = KInteger THEN
             art.dims[i] := cv.ival
          ELSE
-            err := MkEvalError("Array dim not integer", scan, x)
+            err := Ast.MkSrcError("Array dim not integer", scan, x)
          END
       END
    END;
@@ -529,13 +564,14 @@ END TyCvtArrayType;
    parameters and links them into "paramList". Returns the 
    list in reverse order, caller can reverse it if it cares. *)
 PROCEDURE TyCvtFormalParams(mod: Module; frame: Frame; formalParams: Ast.Branch; scan: Lex.T;
-                            VAR paramList: Ty.ProcParam): EvalError;
-VAR err: EvalError;
-    i, j: INTEGER;
+                            VAR paramList: Ty.ProcParam): Ast.SrcError;
+VAR err: Ast.SrcError;
+    i, j, k: INTEGER;
     name: Ast.Terminal;
     fpsec, formalType: Ast.Branch;
     paramTy: Ty.Type;
     fld: Ty.ProcParam;
+    arrType: Ty.ArrayType;
 BEGIN
    err := NIL;
    i := 1;
@@ -548,12 +584,22 @@ BEGIN
          IF Ast.NfVar IN fpsec.flags THEN
             INCL(paramTy.flags, Ty.Var)
          END;
+         (* For each level of openarray nesting, add an outer array
+            type that is marked as an open array. Propagate flags
+            up from the inner type. *)
+         FOR k := 0 TO formalType.n-1 DO
+            arrType := Ty.MkArrayType();   
+            arrType.ndims := 0;
+            INCL(arrType.flags, Ty.OpenArray);
+            arrType.flags := arrType.flags + paramTy.flags;
+            arrType.ty := paramTy;
+            paramTy := arrType
+         END;
          FOR j := 0 TO fpsec.childLen-2 DO
             fld := Ty.MkProcParam();
             name := Ast.TermAt(fpsec, j);
             Lex.Extract(scan, name.tok, fld.name);
             fld.ty := paramTy;
-            paramTy.openArrays := formalType.n;
             fld.next := paramList;
             paramList := fld
          END
@@ -565,8 +611,8 @@ END TyCvtFormalParams;
 
 
 PROCEDURE TyCvtProc(mod: Module; frame: Frame; br: Ast.Branch; scan: Lex.T;
-                    VAR rv: Ty.Type): EvalError;
-VAR err: EvalError;
+                    VAR rv: Ty.Type): Ast.SrcError;
+VAR err: Ast.SrcError;
     formalParams, rtype: Ast.Branch;
     pt: Ty.ProcType;
 BEGIN
@@ -597,7 +643,7 @@ BEGIN
    rv.flags := {ffProcParams};
    param := proc.params;
    WHILE param # NIL DO
-      ts := MkTypeSym();
+      ts := MkTypeSym(tsProcParam);
       Strings.Append(param.name, ts.name);
       ts.ty := param.ty;
       ts.next := rv.vars;
@@ -608,8 +654,8 @@ BEGIN
 END FrameForParams;
 
 PROCEDURE TyCvtProcDecl(mod: Module; frame: Frame; procDecl: Ast.Branch; scan: Lex.T;
-                        VAR rv: Ty.Type): EvalError;
-VAR err: EvalError;
+                        VAR rv: Ty.Type): Ast.SrcError;
+VAR err: Ast.SrcError;
     pty: Ty.ProcType;
     formalParams, bodyDecls, retType: Ast.Branch;
 BEGIN
@@ -636,8 +682,8 @@ BEGIN
 END TyCvtProcDecl; 
 
 PROCEDURE TyCvtPointer(mod: Module; frame: Frame; br: Ast.Branch; scan: Lex.T; 
-                       VAR rv: Ty.Type): EvalError;
-VAR err: EvalError;
+                       VAR rv: Ty.Type): Ast.SrcError;
+VAR err: Ast.SrcError;
     pt: Ty.PointerType;
     dt: Ty.DeferredTarget;
     qn: Ty.QualName;
@@ -661,7 +707,7 @@ BEGIN
       IF pt.ty.kind = Ty.KRecord THEN
          rv := pt
       ELSE
-         err := MkEvalError("Pointer only point to records", scan, br)
+         err := Ast.MkSrcError("Pointer only point to records", scan, br)
       END
    END
 
@@ -669,8 +715,8 @@ BEGIN
 END TyCvtPointer;
 
 PROCEDURE TyCvtRecord(mod: Module; frame: Frame; br: Ast.Branch; scan: Lex.T; 
-                      VAR rv: Ty.Type): EvalError;
-VAR err: EvalError;
+                      VAR rv: Ty.Type): Ast.SrcError;
+VAR err: Ast.SrcError;
     rt: Ty.RecordType;
     fld: Ty.RecordField;
     base, flds, flist, lsty, nmlst: Ast.Branch;
@@ -717,13 +763,13 @@ END TyCvtRecord;
 (* Creates a type from an Ast entry.  The entry can either
    be a terminal for a primitive type we recognize, or something
    parsed by Ast.ParseStrucType *)
-PROCEDURE CvtStrucTypeImpl(mod: Module; frame: Frame; t: Ast.T; scan: Lex.T; VAR rv: Ty.Type): EvalError;
-VAR err: EvalError;
+PROCEDURE CvtStrucTypeImpl(mod: Module; frame: Frame; t: Ast.T; scan: Lex.T; VAR rv: Ty.Type): Ast.SrcError;
+VAR err: Ast.SrcError;
     term: Ast.Terminal;
     br: Ast.Branch;
 BEGIN
    IF t IS Ast.Terminal THEN
-      err := MkEvalError("Unrecognized type", scan, term)
+      err := Ast.MkSrcError("Unrecognized type", scan, term)
    ELSIF t IS Ast.Branch THEN
       br := t(Ast.Branch);
       IF br.kind = Ast.BkQualIdent THEN
@@ -737,20 +783,11 @@ BEGIN
       ELSIF br.kind = Ast.BkProcedureType THEN
          err := TyCvtProc(mod, frame, br, scan, rv)
       ELSE
-         err := MkEvalError("Unrecognized type", scan, br) 
+         err := Ast.MkSrcError("Unrecognized type", scan, br) 
       END
    END
    RETURN err
 END CvtStrucTypeImpl;
-
-PROCEDURE LoadImports(imps: Ast.Branch; rv: Module; scan: Lex.T);
-BEGIN
-   IF imps # NIL THEN
-      ASSERT(imps.kind = Ast.BkImportList);
-      (*TODO: in the future this will load up the the module descs 
-        that get saved when a module is "compiled" *)   
-   END
-END LoadImports;
 
 PROCEDURE MkConstant(): Constant;
 VAR rv: Constant;
@@ -762,7 +799,7 @@ BEGIN
    RETURN rv
 END MkConstant; 
 
-PROCEDURE AddErr*(mod: Module; err: EvalError); 
+PROCEDURE AddErr*(mod: Module; err: Ast.SrcError); 
 BEGIN
    IF mod.nofErrs < LEN(mod.errs) THEN
       mod.errs[mod.nofErrs] := err^;
@@ -774,8 +811,8 @@ END AddErr;
 (* Creates TypeSyms for variables in a VarDeclaration and
    links them into the list pointed to by varList *)
 PROCEDURE CvtAndLinkVars(mod: Module; frame: Frame; varDecl: Ast.Branch; 
-                         scan: Lex.T; VAR varList: TypeSym): EvalError;
-VAR err: EvalError;
+                         scan: Lex.T; VAR varList: TypeSym): Ast.SrcError;
+VAR err: Ast.SrcError;
     identList, tyast: Ast.Branch;
     vtype: Ty.Type;
     fv: TypeSym; 
@@ -787,7 +824,7 @@ BEGIN
    err := CvtStrucType(mod, frame, tyast, scan, vtype);
    IF err = NIL THEN
       FOR i := 0 TO identList.childLen-1 DO
-         fv := MkTypeSym();
+         fv := MkTypeSym(tsVar);
          name := Ast.TermAt(identList, i);
          Lex.Extract(scan, name.tok, fv.name);
          fv.export := name.export;
@@ -801,7 +838,7 @@ END CvtAndLinkVars;
 
 PROCEDURE LoadVars(varDeclSeq: Ast.Branch; rv: Module; frame: Frame; scan: Lex.T);
 VAR i: INTEGER;
-    err: EvalError;
+    err: Ast.SrcError;
 BEGIN
    IF varDeclSeq # NIL THEN
       ASSERT(varDeclSeq.kind = Ast.BkVarDeclSeq);
@@ -821,7 +858,7 @@ VAR i: INTEGER;
     cd: Constant;
     br: Ast.Branch;
     id: Ast.Terminal;
-    err: EvalError;
+    err: Ast.SrcError;
 BEGIN
    IF consts # NIL THEN
       FOR i := 0 TO consts.childLen-1 DO
@@ -846,14 +883,14 @@ END LoadConsts;
 PROCEDURE LoadProcs(procDecls: Ast.Branch; rv: Module; frame: Frame; scan: Lex.T);
 VAR i: INTEGER;
     ent: TypeSym;
-    err: EvalError;
+    err: Ast.SrcError;
     fname: Ast.Terminal;
     procDecl: Ast.Branch;
 BEGIN
    IF procDecls # NIL THEN
       FOR i := 0 TO procDecls.childLen-1 DO
          procDecl := Ast.BranchAt(procDecls, i);
-         ent := MkTypeSym();
+         ent := MkTypeSym(tsProc);
          fname := Ast.TermAt(procDecl, Ast.ProcedureDeclName);
          Lex.Extract(scan, fname.tok, ent.name);
          ent.export := fname.export;
@@ -878,7 +915,7 @@ END LoadProcs;
 PROCEDURE FixupDeferrals(mod: Module; frame: Frame; scan: Lex.T); 
 VAR fv, target: TypeSym;
     pt: Ty.PointerType;
-    err: EvalError;
+    err: Ast.SrcError;
     qname: Ty.QualName;
 BEGIN
    fv := frame.types;
@@ -891,7 +928,7 @@ BEGIN
             Strings.Append(pt.ty(Ty.DeferredTarget).name, qname.name);
             target := FindType(mod, frame, qname);
             IF target = NIL THEN
-               err := MkEvalError("Can not resolve pointer target to type",
+               err := Ast.MkSrcError("Can not resolve pointer target to type",
                                   scan, pt.ty(Ty.DeferredTarget).ast);
                AddErr(mod, err)
             ELSE
@@ -909,14 +946,14 @@ VAR br: Ast.Branch;
     i: INTEGER;
     ty: TypeSym;
     t: Ast.Terminal;
-    err: EvalError;
+    err: Ast.SrcError;
 BEGIN
    IF types # NIL THEN
       ASSERT(types.kind = Ast.BkTypeDeclSeq);
       FOR i := 0 TO types.childLen-1 DO
          br := Ast.BranchAt(types, i);
          ASSERT(br.kind = Ast.BkTypeDeclaration);
-         ty := MkTypeSym();
+         ty := MkTypeSym(tsType);
          err := CvtStrucType(mod, frame, 
                              Ast.GetChild(br, Ast.TypeDeclVal), scan,
                                           ty.ty);
@@ -946,14 +983,228 @@ BEGIN
    END
 END LoadDeclsImpl;
 
+PROCEDURE WriteConstVal(VAR w: BinWriter.T; cv: ConstVal);
+BEGIN
+   BinWriter.I8(w, cv.kind);
+   CASE cv.kind OF
+      KByte: BinWriter.U8(w, cv.byval)
+      |KInteger: BinWriter.I32(w, cv.ival)
+      |KBoolean: BinWriter.Bool(w, cv.bval)
+      |KReal: BinWriter.F32(w, cv.rval)
+      |KChar: BinWriter.I32(w, ORD(cv.cval))
+      |KSet: BinWriter.I32(w, SYSTEM.VAL(INTEGER, cv.setval)) 
+   END;
+END WriteConstVal;
+
+PROCEDURE ReadConstVal(VAR w: BinReader.T; VAR cv: ConstVal);
+VAR i: INTEGER;
+BEGIN
+   BinReader.I8(w, cv.kind);
+   CASE cv.kind OF
+      KByte: BinReader.U8(w, cv.byval)
+      |KInteger: BinReader.I32(w, cv.ival)
+      |KBoolean: BinReader.Bool(w, cv.bval)
+      |KReal: BinReader.F32(w, cv.rval)
+      |KChar: BinReader.I32(w, i); cv.cval := CHR(i)
+      |KSet: BinReader.I32(w, i); cv.setval := SYSTEM.VAL(SET, i)
+   END;
+END ReadConstVal;
+
+PROCEDURE WriteConstants(VAR w: BinWriter.T; con: Constant);
+VAR written: BOOLEAN;
+BEGIN
+   written := FALSE;
+   WHILE con # NIL DO
+      IF con.exported THEN
+         written := TRUE;
+         BinWriter.Bool(w, TRUE);
+         BinWriter.String(w, con.name);
+         WriteConstVal(w, con.val);
+      END;
+      con := con.next
+   END;
+   (* Must have empty mark if there are no items *)
+   IF ~written THEN BinWriter.Bool(w, FALSE) END
+END WriteConstants;
+
+PROCEDURE ReadConstants(VAR w: BinReader.T): Constant;
+VAR rv, con: Constant;
+BEGIN
+   rv := NIL;
+   WHILE BinReader.Cond(w) DO
+      con := MkConstant();
+      BinReader.String(w, con.name);
+      ReadConstVal(w, con.val);
+      con.next := rv;
+      rv := con
+   END;
+   RETURN rv
+END ReadConstants;
+
+PROCEDURE WriteTypeSyms(VAR w: BinWriter.T; ts: TypeSym);
+VAR written: BOOLEAN;
+BEGIN
+   written := FALSE;
+   WHILE ts # NIL DO
+      IF ts.export THEN
+         written := TRUE;
+         BinWriter.Bool(w, TRUE);
+         BinWriter.I8(w, ts.kind);
+         BinWriter.String(w, ts.name);
+         Ty.Write(w, ts.ty)
+      END;
+      ts := ts.next
+   END;
+   (* Must write empty mark if there were no items *)
+   IF ~written THEN BinWriter.Bool(w, FALSE) END
+END WriteTypeSyms;
+
+PROCEDURE ReadTypeSyms(VAR w: BinReader.T): TypeSym;
+VAR rv, ts: TypeSym;
+BEGIN
+   rv := NIL;
+   WHILE BinReader.Cond(w) DO
+      ts := MkTypeSym(0);
+      BinReader.I8(w, ts.kind);
+      BinReader.String(w, ts.name);
+      ts.ty := Ty.Read(w);
+      ts.next := rv;
+      rv := ts
+   END;
+   RETURN rv
+END ReadTypeSyms;
+
+PROCEDURE WriteFrame(VAR w: BinWriter.T; fr: Frame);
+BEGIN
+   BinWriter.I32(w, FrameMagic);
+   BinWriter.I32(w, SYSTEM.VAL(INTEGER, fr.flags));
+   WriteTypeSyms(w, fr.types);
+   WriteConstants(w, fr.constants);
+   WriteTypeSyms(w, fr.vars);
+   WriteTypeSyms(w, fr.procedures);
+END WriteFrame;
+
+PROCEDURE ReadFrame(VAR w: BinReader.T; mod: Module): Frame;
+VAR fr: Frame;
+    mag, flags: INTEGER;
+BEGIN
+   BinReader.I32(w, mag); ASSERT(mag = FrameMagic);
+   BinReader.I32(w, flags);
+   fr := MkFrame(mod, NIL);
+   fr.flags := SYSTEM.VAL(SET, flags);
+   fr.types := ReadTypeSyms(w);
+   fr.constants := ReadConstants(w);
+   fr.vars := ReadTypeSyms(w);
+   fr.procedures := ReadTypeSyms(w);
+   RETURN fr
+END ReadFrame;
+
+(* Writes out a symbol table that contains just the public members.
+   This acts as an interface file that we can load to resolve
+   names and types for imported modules when compiling *)
+PROCEDURE Write*(VAR w: BinWriter.T; mod: Module);
+BEGIN
+   BinWriter.String(w, FileMagic);
+   BinWriter.I32(w, SymtabVer);
+   BinWriter.String(w, mod.name);
+   WriteFrame(w, mod.frame);
+END Write;
+
+(* Reads the previously saved symtab for a module.  Contains just
+   the exported items *)
+PROCEDURE Read*(VAR w: BinReader.T): Module;
+VAR mod: Module;
+    mag: ARRAY 5 OF CHAR;
+    ver: INTEGER;
+BEGIN
+   mod := MkModule();
+   BinReader.String(w, mag);
+   ASSERT(Ast.StringEq(mag, FileMagic));
+   BinReader.I32(w, ver);
+   ASSERT(ver = SymtabVer);
+   BinReader.String(w, mod.name);
+   mod.frame := ReadFrame(w, mod);
+   RETURN mod
+END Read;
+
+(* If not loaded already, get the builtin symbols *)
+PROCEDURE LoadBuiltins();
+VAR path: Path.T;
+    rd: BinReader.T;
+    ts: TypeSym;
+BEGIN
+   IF Builtins = NIL THEN
+      Config.BuiltinsSymtabFile(path);
+      IF BinReader.Init(rd, path.str) THEN
+         Builtins := Read(rd);
+         BinReader.Finish(rd);
+         ts := Builtins.frame.procedures;
+         WHILE ts # NIL DO
+            INCL(ts.ty.flags, Ty.Builtin);
+            ts := ts.next
+         END
+      ELSE
+         Dbg.S("ERROR: could not load builtins symtab");
+         Dbg.Ln;
+         ASSERT(FALSE)
+      END
+   END
+END LoadBuiltins;
+
+PROCEDURE LoadImports(imps: Ast.Branch; rv: Module; scan: Lex.T);
+VAR i: INTEGER;
+    imp: Ast.Branch;
+    rd: BinReader.T;
+    spath: Path.T;
+    mod: Module;
+    modname: ARRAY 64 OF CHAR;
+    mname: Ast.Terminal;
+BEGIN
+   IF imps # NIL THEN
+      ASSERT(imps.kind = Ast.BkImportList);
+      FOR i := 0 TO imps.childLen-1 DO
+         imp := Ast.BranchAt(imps, i);
+         mname := Ast.TermAt(imp, 1);
+         (* TODO should we keep up with original module name? *)
+         Lex.Extract(scan, mname.tok, modname);
+         IF Config.FindModPath(modname, spath) THEN
+            IF BinReader.Init(rd, spath.str) THEN
+               mod := Read(rd);
+               BinReader.Finish(rd);
+               mname := Ast.TermAt(imp, 0);
+               IF mname # NIL THEN
+                  (* Alias *)
+                  Lex.Extract(scan, mname.tok, mod.name)
+               END;
+               mod.importNext := rv.imports;
+               rv.imports := mod;
+            ELSE
+               AddErr(rv, Ast.MkSrcError(
+                  "Could not read symbol file for module", 
+                  scan, mname))
+            END
+         ELSE
+            AddErr(rv, Ast.MkSrcError(
+               "Could not find symbol file for module", 
+               scan, mname))
+         END;
+      END
+   END
+END LoadImports;
+
+
 (* Create a Module for the AST version of a Module.   Populates the 
    errs/nofErrs fields of the module if there's errors *)
 PROCEDURE BuildModule*(ast: Ast.T; scan: Lex.T): Module;
 VAR rv: Module;
-    mod: Ast.Branch;
+    mod, initBlock: Ast.Branch;
     term: Ast.Terminal;
+    initBlockTs: TypeSym;
+    ptype: Ty.ProcType;
 BEGIN
+   LoadBuiltins();
    rv := MkModule();
+   rv.frame.searchNext := Builtins.frame;  (* Always in scope *)
    mod := ast(Ast.Branch);
    ASSERT(mod.kind = Ast.BkModule);
    term := Ast.TermAt(mod, Ast.ModuleName);
@@ -962,6 +1213,17 @@ BEGIN
    IF rv.nofErrs = 0 THEN
       LoadDecls(Ast.BranchAt(mod, Ast.ModuleDecls), rv, rv.frame, scan)
    END;
+   initBlock := Ast.BranchAt(mod, Ast.ModuleInit);
+   IF initBlock # NIL THEN
+      (* make a frame and proctype for the module init code *)
+      rv.initBlock := MkFrame(rv, rv.frame);
+      initBlockTs := MkTypeSym(tsProc);
+      ptype := Ty.MkProcType();
+      ptype.body := initBlock;
+      initBlockTs.ty := ptype;
+      initBlockTs.frame := rv.frame;
+      rv.initBlock.procedures := initBlockTs
+   END;
 
    RETURN rv   
 END BuildModule;
@@ -969,4 +1231,6 @@ END BuildModule;
 BEGIN
    CvtStrucType := CvtStrucTypeImpl;
    LoadDecls := LoadDeclsImpl;
+   FileMagic := "SYMT";
+   Builtins := NIL;
 END Symtab.

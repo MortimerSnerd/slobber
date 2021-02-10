@@ -1,17 +1,21 @@
-EXES=TestScanner TestParser TestRender TestSymtab
+EXES=TestScanner TestParser TestRender TestSymtab MkSymtab
+.PHONY: clean TestScanner TestParser TestRender TestSymtab MkSymtab
 all: $(EXES)
 
-TestScanner: TestScanner.mod Scanner.mod
+TestScanner: 
 	CFLAGS=-g obnc TestScanner.mod
 
-TestParser: TestParser.mod Scanner.mod Ast.mod Dbg.mod Parser.mod
+TestParser: 
 	CFLAGS=-g obnc TestParser.mod
 
-TestRender: TestRender.mod Scanner.mod Ast.mod Dbg.mod Parser.mod Render.mod
+TestRender: 
 	CFLAGS=-g obnc TestRender.mod
 
-TestSymtab: TestSymtab.mod Symtab.mod Semcheck.mod Scanner.mod Ast.mod Dbg.mod Parser.mod Types.mod
+TestSymtab: 
 	CFLAGS=-g obnc TestSymtab.mod
 
+MkSymtab:
+	CFLAGS=-g obnc MkSymtab.mod
+
 clean:
-	rm -rf .obnc $(EXES)
+	rm -rf .obnc $(EXES) *.slo
