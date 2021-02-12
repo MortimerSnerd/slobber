@@ -24,6 +24,12 @@ BEGIN
    Symtab.AddErr(st.mod, Ast.MkSrcError(msg, st.scan, loc))
 END AddErr;
 
+(* TODO need some special casing for some of the SYSTEM module
+   functions for both ExpressionType() and CheckCall. 
+   Ex: SYSTEM.SIZE(REAL):INTEGER, and SYSTEM.VAL(X, someExpr):X. 
+   Can't pass types as function parameters, so we can't do these in 
+   stubs, but need to special case them *)
+
 (* Steps through a designator to see what the end type will be once all
    of the selectors are applied. Adds type annotations to the selectors
    so the calculated information can be re-used later. *)
@@ -144,32 +150,36 @@ BEGIN
       IF br.kind = Ast.BkUnOp THEN
          rv := ExpressionType(mod, scope, Ast.GetChild(br, 1), scan, err)
 
+      ELSIF br.kind = Ast.BkSet THEN
+         rv := Ty.PrimitiveType(Ty.KSet)
       ELSIF br.kind = Ast.BkParenExpr THEN
          rv := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err)
 
       ELSIF br.kind = Ast.BkBinOp THEN
-         lhs := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err);
-         IF err = NIL THEN
-            rhs := ExpressionType(mod, scope, Ast.GetChild(br, 2), scan, err);
+         term := Ast.TermAt(br, 1);
+         IF term.tok.kind = Lex.COLEQ THEN
+            (* The type checking for assigments is left up to 
+               CheckAssignment() *)
+            rv := Ty.VoidType
+         ELSE
+            lhs := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err);
             IF err = NIL THEN
-               IF Ty.Equal(lhs, rhs) THEN
-                  term := Ast.TermAt(br, 1);
-                  IF term.tok.kind = Lex.COLEQ THEN
-                     (* Assignment not typed *)
-                     rv := Ty.VoidType
-                  ELSIF IsCompare(term.tok.kind) THEN
-                     rv := Ty.BooleanType
+               rhs := ExpressionType(mod, scope, Ast.GetChild(br, 2), scan, err);
+               IF err = NIL THEN
+                  IF Ty.Equal(lhs, rhs) THEN
+                     IF IsCompare(term.tok.kind) THEN
+                        rv := Ty.BooleanType
+                     ELSE
+                        rv := lhs
+                     END
                   ELSE
-                     rv := lhs
+                     rv := Ty.ErrorType;
+                     err := Ast.MkSrcError("Binary operator mismatched types", 
+                                           scan, Ast.GetChild(br, 1))
                   END
-               ELSE
-                  rv := Ty.ErrorType;
-                  err := Ast.MkSrcError("Binary operator mismatched types", 
-                                        scan, Ast.GetChild(br, 1))
                END
             END
          END
-
       ELSIF br.kind = Ast.BkCall THEN
          (* We only check the expression type here, not whether
             the call parameters are properly typed *)
@@ -260,18 +270,20 @@ PROCEDURE Pass0Proc(st: State; proc: Symtab.TypeSym);
    PROCEDURE Walk(st: State; proc: Symtab.TypeSym; br: Ast.Branch); 
    VAR i: INTEGER;
        n: Ast.T;
+       chld: Ast.Branch;
    BEGIN
       IF br.kind = Ast.BkDesignator THEN
          FixupDesignator(st, proc, br)
-      ELSE
-         FOR i := 0 TO br.childLen-1 DO
-            n := Ast.GetChild(br, i);
-            IF n IS Ast.Branch THEN
-               IF n(Ast.Branch).kind = Ast.BkDesignator THEN
-                  FixupTyGuardFunctions(st, proc, br, i)
-               END;
-               Walk(st, proc, n(Ast.Branch))
-            END
+      END;
+      FOR i := 0 TO br.childLen-1 DO
+         n := Ast.GetChild(br, i);
+         IF n IS Ast.Branch THEN
+            chld := n(Ast.Branch);
+            IF chld.kind = Ast.BkDesignator THEN
+               FixupTyGuardFunctions(st, proc, br, i);
+               chld := Ast.BranchAt(br, i)
+            END;
+            Walk(st, proc, chld)
          END
       END
    END Walk;
@@ -586,6 +598,8 @@ VAR i: INTEGER;
     varInf: Symtab.TypeSym;
     qn: Ty.QualName;
     note: Ty.TypeNote;
+    ignore: Ty.Type;
+    err: Ast.SrcError;
 BEGIN
    (* Find out var identifier the designator starts out with 
       is writable. This can influence whether the result of
@@ -608,6 +622,12 @@ BEGIN
          the resulting loc is definitely writable. *)
       i := Ast.DesignatorSelectors;
       done := FALSE;
+      (* Make sure the designator already has selector notes *)
+      ignore := DesignatorType(st.mod, proc.frame, desig, st.scan, err);
+      IF err # NIL THEN 
+         Symtab.AddErr(st.mod, err);
+         done := TRUE
+      END;
       WHILE ~done & (i < desig.childLen) DO
          sel := Ast.BranchAt(desig, i);
          IF sel.n = Ast.FieldAccess THEN
@@ -633,15 +653,65 @@ BEGIN
    RETURN rv
 END IsLocWritable;
 
-(* We' already know the types of both sides match by the time we get
-   here, now just need to make sure it's a writable var.   *)
+(* If we get here, we know tyl and tyr are not exactly equal. 
+   We check to see if it's one of the array assignments that
+   are allowable, or if it's just an error *)
+PROCEDURE CheckAssignmentValid(st: State; proc: Symtab.TypeSym; 
+                               lhs, rhs: Ast.T; tyl, tyr: Ty.Type);
+VAR larr, rarr: Ty.ArrayType;
+    nomatch: BOOLEAN;
+BEGIN
+   nomatch := FALSE;
+   IF (tyl.kind = Ty.KArray) & (tyr.kind = Ty.KArray) THEN
+      larr := tyl(Ty.ArrayType);
+      rarr := tyr(Ty.ArrayType);
+      IF Ty.Equal(larr.ty, rarr.ty) THEN
+         IF ~(Ty.OpenArray IN larr.flags) & (rarr.dim > larr.dim) THEN
+            AddErr(st, "LHS of assignment not big enough to hold RHS.", 
+                   rhs)
+         END
+      ELSE
+         nomatch := TRUE
+      END
+   ELSE
+      nomatch := TRUE;
+   END;
+   IF nomatch THEN
+      AddErr(st, "Assignment types do not match.", lhs)
+   END
+END CheckAssignmentValid;
+
+(* We need to typecheck the assignment and and make sure the LHS is
+   a writable var. We have to be more flexible than just a 
+   Types.Equal, since arrays of different sizes can be assigned
+   as a shorthand for COPY. *)
 PROCEDURE CheckAssignment(st: State; proc: Symtab.TypeSym; stmt: Ast.Branch);
 VAR desig: Ast.Branch;
+    rhs: Ast.T;
+    tyl, tyr: Ty.Type;
+    err: Ast.SrcError;
 BEGIN
    desig := Ast.BranchAt(stmt, 0);
+   rhs := Ast.GetChild(stmt, 2);
    IF ~IsLocWritable(st, proc, desig) THEN
       AddErr(st, "LHS of assignment is not writable.", desig)
+   ELSE
+      tyl := DesignatorType(st.mod, proc.frame, desig, st.scan, err);
+      IF err = NIL THEN
+         tyr := ExpressionType(st.mod, proc.frame, rhs, st.scan, err);
+         IF err = NIL THEN
+            IF ~Ty.Equal(tyl, tyr) THEN
+               CheckAssignmentValid(st, proc, desig, rhs, tyl, tyr)
+            END
+         ELSE
+            Symtab.AddErr(st.mod, err)
+         END
+      ELSE
+         Symtab.AddErr(st.mod, err)
+      END
    END
+   (* TODO - IF RHS is literal, check LHS type value range and see
+             if it is out of range, ie:  someByte := 256 *)
 END CheckAssignment;
 
 PROCEDURE CheckCallStmt(st: State; proc: Symtab.TypeSym; stmt: Ast.Branch);
@@ -652,18 +722,38 @@ BEGIN
    CheckExpression(st, proc, stmt)
 END CheckCallStmt;
 
-PROCEDURE CheckStatement(st: State; proc: Symtab.TypeSym; stmt: Ast.Branch);
+PROCEDURE IsParameterlessCall(stmt: Ast.Branch; ty: Ty.Type): BOOLEAN;
+   RETURN (stmt.kind = Ast.BkDesignator)
+          & (ty.kind = Ty.KProcedure)
+          & (ty(Ty.ProcType).params = NIL)
+END IsParameterlessCall;
+
+PROCEDURE CheckStatement(st: State; proc: Symtab.TypeSym; 
+                         parent: Ast.Branch; stmtIx: INTEGER;
+                         stmt: Ast.Branch);
 VAR err: Ast.SrcError;
     ty: Ty.Type;
+    ncall: Ast.Branch;
 BEGIN
    (* statements should have a void return type *)
    ty := ExpressionType(st.mod, proc.frame, stmt, st.scan, err);
    IF err # NIL THEN
       Symtab.AddErr(st.mod, err)
+      
    ELSIF ty.kind # Ty.KVoid THEN
-      Symtab.AddErr(st.mod, 
-                    Ast.MkSrcError("Expression value ignored.", st.scan,
-                    stmt)) 
+      IF (ty.kind = Ty.KProcedure) & IsParameterlessCall(stmt, ty) THEN
+         (* Ex: Out.Ln; It's parsed as just a designator, 
+            rewrite this to be a call so it will be obvious to 
+            later stages. *)
+         ncall := Ast.MkCall();
+         Ast.AddChild(ncall, stmt);
+         Ast.AddChild(ncall, NIL);
+         Ast.SetChild(parent, stmtIx, ncall)
+      ELSE
+         Symtab.AddErr(st.mod, 
+                       Ast.MkSrcError("Expression value ignored.", st.scan,
+                       stmt)) 
+      END
    ELSE
       IF stmt.kind = Ast.BkIfStmt THEN
          CheckIfStmt(st, proc, stmt)
@@ -692,7 +782,7 @@ BEGIN
    IF seq # NIL THEN
       IF seq.kind = Ast.BkStatementSeq THEN
          FOR i := 0 TO seq.childLen-1 DO
-            CheckStatement(st, proc, Ast.BranchAt(seq, i))
+            CheckStatement(st, proc, seq, i, Ast.BranchAt(seq, i))
          END
       ELSE
          AddErr(st, "Not a statement sequence?", seq)

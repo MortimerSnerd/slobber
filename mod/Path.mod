@@ -45,7 +45,34 @@ BEGIN
    RETURN rv
 END FindLast;
 
-(* Extracts the basename of 'a' and copies it to `dest` *)
+PROCEDURE Copy*(src: T; VAR dest: T);
+VAR i: INTEGER;
+BEGIN
+   dest.len := src.len;
+   FOR i := 0 TO src.len DO
+      dest.str[i] := src.str[i]
+   END
+END Copy;
+
+(* Drops the last directory or file off the end of the path.
+   This will make the path empty if you call it enough times *)
+PROCEDURE Drop*(VAR p: T);
+VAR i:INTEGER;
+BEGIN
+   IF p.len > 0 THEN
+      i := p.len - 1;
+      IF p.str[i] = "/" THEN DEC(i) END;
+      WHILE (i >= 0) & (p.str[i] # "/") DO
+         DEC(i)
+      END;
+      p.len := i + 1;
+      p.str[p.len] := 0X
+   END
+END Drop;
+
+(* Extracts the basename of 'a' and copies it to `dest`.
+   If there is no path component, then the entire path is
+   considered the base name. ie, Basename("arf") = "arf" *)
 PROCEDURE Basename*(a: T; VAR dest: T);
 VAR i, pos: INTEGER;
 BEGIN
@@ -59,7 +86,7 @@ BEGIN
          INC(i); INC(pos)
       END;
    ELSE
-      dest.len := 0
+      Copy(a, dest)
    END
 END Basename;
 
@@ -92,15 +119,6 @@ BEGIN
    END
 END AssertDir;
      
-PROCEDURE Copy*(src: T; VAR dest: T);
-VAR i: INTEGER;
-BEGIN
-   dest.len := src.len;
-   FOR i := 0 TO src.len DO
-      dest.str[i] := src.str[i]
-   END
-END Copy;
-
 PROCEDURE Append*(VAR p: T; s: ARRAY OF CHAR);
 VAR i, slen: INTEGER;
 BEGIN

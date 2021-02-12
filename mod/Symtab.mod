@@ -17,7 +17,7 @@ CONST
    ffProcParams*=1;              (* Separate frame just for proc params *)
 
    (* TypeSym kinds *)
-   tsVar*=0; tsProc*=1; tsType*=2; tsProcParam*=3;
+   tsVar*=0; tsProc*=1; tsType*=2; tsProcParam*=3; tsConst*=4;
 
    (* Version for symtab files *)
    SymtabVer=50H; FrameMagic=46H;
@@ -34,14 +34,7 @@ TYPE
       setval*: SET;
       byval*: BYTE
    END;
-
-   Constant* = POINTER TO ConstantDesc;
-   ConstantDesc* = RECORD
-      name*: ARRAY MaxNameLen OF CHAR;
-      exported*: BOOLEAN;
-      val*: ConstVal;
-      next: Constant
-   END;
+   OptConstVal* = POINTER TO ConstVal;
 
    (* Association of name and type. Used for types and vars. *)
    TypeSym* = POINTER TO TypeSymDesc;
@@ -51,6 +44,7 @@ TYPE
       name*: ARRAY MaxNameLen OF CHAR;
       ty*: Ty.Type;
       export*: BOOLEAN;
+      val*: OptConstVal;
       (* If this name has a scope, this is the frame for the scope *)
       frame*: Frame;
       next*: TypeSym
@@ -74,7 +68,7 @@ TYPE
       (* ff* flags *)
       flags*: SET; 
       types*: TypeSym;
-      constants*: Constant;
+      constants*: TypeSym;
       vars*: TypeSym;
       procedures*: TypeSym;
       (* The next enclosing scope/frame *)
@@ -224,47 +218,6 @@ BEGIN
    RETURN rv
 END FindImport;
 
-PROCEDURE FindConst*(m: Module; frame: Frame; n: Ty.QualName): Constant;
-VAR c: Constant;
-    done: BOOLEAN;
-BEGIN
-   IF Ty.IsQualified(n) THEN
-      m := FindImport(m, n.module);
-      IF m # NIL THEN frame := m.frame END;
-   END;
-   IF m # NIL THEN
-      done := FALSE;
-      WHILE ~done & (frame # NIL) DO
-         c := frame.constants;
-         WHILE ~done & (c # NIL) DO
-            IF Ast.StringEq(c.name, n.name) THEN
-               done := TRUE
-            ELSE
-               c := c.next
-            END
-         END;
-         frame := frame.searchNext
-      END;
-   ELSE
-      c := NIL
-   END;
-   RETURN c
-END FindConst;
-
-PROCEDURE LookupConst(m: Module; frame: Frame; n: Ty.QualName; VAR dest: ConstVal): BOOLEAN;
-VAR rv: BOOLEAN;
-    c: Constant;
-BEGIN
-   c := FindConst(m, frame, n);
-   IF c = NIL THEN
-      rv := FALSE
-   ELSE
-      dest := c.val;
-      rv := TRUE
-   END;
-   RETURN rv
-END LookupConst;
-
 PROCEDURE FindTypeSym*(rv: TypeSym; name: ARRAY OF CHAR): TypeSym; 
 VAR done: BOOLEAN;
 BEGIN
@@ -279,22 +232,91 @@ BEGIN
    RETURN rv
 END FindTypeSym;
 
+(* Searches for a named const in just the given frame *)
+PROCEDURE FindConstThisFrame*(m: Module; frame: Frame; n: Ty.QualName): TypeSym;
+BEGIN
+   IF Ty.IsQualified(n) THEN
+      m := FindImport(m, n.module);
+      IF m # NIL THEN frame := m.frame END;
+   END;
+   RETURN FindTypeSym(frame.constants, n.name)
+END FindConstThisFrame;
+
+(* Searches for the named const in "frame" and all enclosing scopes, if
+   n is not qualified. *)
+PROCEDURE FindConst*(m: Module; frame: Frame; n: Ty.QualName): TypeSym;
+VAR rv: TypeSym;
+BEGIN
+   REPEAT
+      rv := FindConstThisFrame(m, frame, n);
+      frame := frame.searchNext;
+   UNTIL (rv # NIL) OR (frame = NIL) OR Ty.IsQualified(n);
+   RETURN rv
+END FindConst;
+
+PROCEDURE LookupConst(m: Module; frame: Frame; n: Ty.QualName; VAR dest: ConstVal): BOOLEAN;
+VAR rv: BOOLEAN;
+    c: TypeSym;
+BEGIN
+   c := FindConst(m, frame, n);
+   IF (c = NIL) OR (c.val = NIL) THEN
+      rv := FALSE
+   ELSE
+      dest := c.val^;
+      rv := TRUE
+   END;
+   RETURN rv
+END LookupConst;
+
+(* If n is not qualified, searches for the proc just in the given frame *)
+PROCEDURE FindProcThisFrame*(m: Module; frame: Frame; n: Ty.QualName): TypeSym; 
+BEGIN
+   IF Ty.IsQualified(n) THEN
+      m := FindImport(m, n.module);
+      IF m # NIL THEN frame := m.frame END
+   END;
+   RETURN FindTypeSym(frame.procedures, n.name)
+END FindProcThisFrame;
+
+(* If n is not qualified, searches for the proc with the given name
+   in the current and enclosing scopes *)
 PROCEDURE FindProc*(m: Module; frame: Frame; n: Ty.QualName): TypeSym; 
 VAR rv: TypeSym;
 BEGIN
+   REPEAT
+      rv := FindProcThisFrame(m, frame, n);
+      frame := frame.searchNext
+   UNTIL (rv # NIL) OR (frame = NIL) OR Ty.IsQualified(n);
+   RETURN rv
+END FindProc;
+
+(* Looks for the named type just in this given frame *)
+PROCEDURE FindTypeThisFrame*(m: Module; frame: Frame; n: Ty.QualName): TypeSym; 
+BEGIN
    IF Ty.IsQualified(n) THEN
       m := FindImport(m, n.module);
       IF m # NIL THEN frame := m.frame END
    END;
-   rv := NIL;
-   WHILE (frame # NIL) & (rv = NIL) DO
-      rv := FindTypeSym(frame.procedures, n.name);
-      frame := frame.searchNext
-   END;
-   RETURN rv
-END FindProc;
+   RETURN FindTypeSym(frame.types, n.name)
+END FindTypeThisFrame;
 
+(* Looks for a type with the given name in all of the enclosing
+   scopes, starting at "frame" *)
 PROCEDURE FindType*(m: Module; frame: Frame; n: Ty.QualName): TypeSym; 
+VAR rv: TypeSym;
+BEGIN
+   REPEAT
+      rv := FindTypeThisFrame(m, frame, n);
+      frame := frame.searchNext;
+   UNTIL (rv # NIL) OR (frame = NIL) OR Ty.IsQualified(n);
+   RETURN rv
+END FindType;
+
+
+(* Find a var, and if found, also returns the frame it 
+   was found in.  Looks only in the given frame. *)
+PROCEDURE FindVarLocThisFrame*(m: Module; frame: Frame; n: Ty.QualName; 
+                               VAR foundIn: Frame): TypeSym; 
 VAR rv: TypeSym;
 BEGIN
    IF Ty.IsQualified(n) THEN
@@ -302,29 +324,19 @@ BEGIN
       IF m # NIL THEN frame := m.frame END
    END;
    rv := NIL;
-   WHILE (frame # NIL) & (rv = NIL) DO
-      rv := FindTypeSym(frame.types, n.name);
-      frame := frame.searchNext
-   END;
+   rv := FindTypeSym(frame.vars, n.name);
+   IF rv # NIL THEN foundIn := frame END;
    RETURN rv
-END FindType;
+END FindVarLocThisFrame;
 
-(* Find a var, and if found, also returns the frame it 
-   was found in *)
 PROCEDURE FindVarLoc*(m: Module; frame: Frame; n: Ty.QualName; 
                       VAR foundIn: Frame): TypeSym; 
 VAR rv: TypeSym;
 BEGIN
-   IF Ty.IsQualified(n) THEN
-      m := FindImport(m, n.module);
-      IF m # NIL THEN frame := m.frame END
-   END;
-   rv := NIL;
-   WHILE (frame # NIL) & (rv = NIL) DO
-      rv := FindTypeSym(frame.vars, n.name);
-      IF rv # NIL THEN foundIn := frame END;
+   REPEAT
+      rv := FindVarLocThisFrame(m, frame, n, foundIn);
       frame := frame.searchNext
-   END;
+   UNTIL (rv # NIL) OR (frame = NIL) OR Ty.IsQualified(n);
    RETURN rv
 END FindVarLoc;
 
@@ -339,10 +351,15 @@ END FindVar;
    a type, procedure or var. *)
 PROCEDURE FindAny*(m: Module; scope: Frame; n: Ty.QualName): TypeSym;
 VAR rv: TypeSym;
+    ignore: Frame;
 BEGIN
-   rv := FindType(m, scope, n);
-   IF rv = NIL THEN rv := FindProc(m, scope, n) END;
-   IF rv = NIL THEN rv := FindVar(m, scope, n) END
+   REPEAT
+      rv := FindTypeThisFrame(m, scope, n);
+      IF rv = NIL THEN rv := FindProcThisFrame(m, scope, n) END;
+      IF rv = NIL THEN rv := FindVarLocThisFrame(m, scope, n, ignore) END;
+      IF rv = NIL THEN rv := FindConstThisFrame(m, scope, n) END;
+      scope := scope.searchNext
+   UNTIL (rv # NIL) OR (scope = NIL) OR Ty.IsQualified(n);
    RETURN rv
 END FindAny;
 
@@ -378,6 +395,14 @@ BEGIN
          END
       ELSE
          rv := Ast.MkSrcError("Could not parse hex char literal", scan, t)
+      END      
+   ELSIF t.tok.kind = Lex.ConstReal THEN
+      Lex.Extract(scan, t.tok, buf);
+      Cvt.StringToReal(buf, dest.rval, dest.bval);
+      IF dest.bval THEN
+         dest.kind := KReal
+      ELSE
+         rv := Ast.MkSrcError("Could not parse real literal", scan, t)
       END      
    ELSE
       rv := Ast.MkSrcError("Unrecognized constant value", scan, t)
@@ -529,33 +554,42 @@ END TyCvtQualIdent;
 PROCEDURE TyCvtArrayType(mod: Module; frame: Frame; br: Ast.Branch; scan: Lex.T; 
                          VAR rv: Ty.Type): Ast.SrcError;
 VAR err: Ast.SrcError;
-    art: Ty.ArrayType;
+    art, lastarr: Ty.ArrayType;
     cv: ConstVal;
     dms: Ast.Branch;
     x: Ast.T;
-    i: INTEGER;
+    i, ndims: INTEGER;
 BEGIN
-   art := Ty.MkArrayType();
    dms := Ast.BranchAt(br, Ast.ArrayTypeDims);
-   art.ndims := dms.childLen;
-   FOR i := 0 TO art.ndims-1 DO
+   ndims := dms.childLen;
+   lastarr := NIL;
+   (* expand ARRAY 1,2,3 OF X to nested arrays ARRAY 1 OF ARRAY 2 ... *)
+   FOR i := ndims-1 TO 0 BY -1 DO
+      art := Ty.MkArrayType();
       x := Ast.GetChild(dms, i);
       err := EvalConstExpr(mod, frame, scan, x, cv);
       IF err = NIL THEN
          IF cv.kind = KInteger THEN
-            art.dims[i] := cv.ival
+            art.dim := cv.ival
          ELSE
             err := Ast.MkSrcError("Array dim not integer", scan, x)
          END
+      END;
+      IF lastarr = NIL THEN
+         (* innermost type, get the contained type *)
+         err := CvtStrucType(mod, frame, Ast.GetChild(br, Ast.ArrayTypeType),
+                             scan, art.ty);   
+         lastarr := art
+      ELSE
+         art.ty := lastarr;
+         lastarr := art
       END
    END;
-   IF err = NIL THEN
-      err := CvtStrucType(mod, frame, Ast.GetChild(br, Ast.ArrayTypeType),
-                          scan, art.ty);
-      IF err = NIL THEN
-         rv := art
-      END
-   END
+   IF err # NIL THEN
+      rv := NIL
+   ELSE
+      rv := art
+   END;
 
    RETURN err
 END TyCvtArrayType;
@@ -589,7 +623,7 @@ BEGIN
             up from the inner type. *)
          FOR k := 0 TO formalType.n-1 DO
             arrType := Ty.MkArrayType();   
-            arrType.ndims := 0;
+            arrType.dim := 0;
             INCL(arrType.flags, Ty.OpenArray);
             arrType.flags := arrType.flags + paramTy.flags;
             arrType.ty := paramTy;
@@ -663,11 +697,13 @@ BEGIN
    pty := Ty.MkProcType();
    formalParams := Ast.BranchAt(procDecl, Ast.ProcedureDeclParams);
    pty.body := Ast.BranchAt(procDecl, Ast.ProcedureDeclBody);
-   retType := Ast.BranchAt(formalParams, Ast.FormalParamsReturn);
-   IF retType # NIL THEN
-      err := CvtStrucType(mod, frame, retType, scan, pty.returnTy)
+   IF formalParams # NIL THEN
+      retType := Ast.BranchAt(formalParams, Ast.FormalParamsReturn);
+      IF retType # NIL THEN
+         err := CvtStrucType(mod, frame, retType, scan, pty.returnTy)
+      END;
    END;
-   IF err = NIL THEN
+   IF (err = NIL) & (formalParams # NIL) THEN
       err := TyCvtFormalParams(mod, frame, formalParams, scan, pty.params);
    END;
    IF err = NIL THEN
@@ -704,7 +740,7 @@ BEGIN
             err := NIL;
          END
    ELSE
-      IF pt.ty.kind = Ty.KRecord THEN
+      IF (pt.ty.kind = Ty.KRecord) OR (pt.ty.kind = Ty.KAny) THEN
          rv := pt
       ELSE
          err := Ast.MkSrcError("Pointer only point to records", scan, br)
@@ -789,12 +825,11 @@ BEGIN
    RETURN err
 END CvtStrucTypeImpl;
 
-PROCEDURE MkConstant(): Constant;
-VAR rv: Constant;
+PROCEDURE MkConstant(): TypeSym;
+VAR rv: TypeSym;
 BEGIN
-   NEW(rv);
-   rv.exported := FALSE;
-   rv.next := NIL;
+   rv := MkTypeSym(tsConst);
+   NEW(rv.val);
    rv.val.kind := KError;
    RETURN rv
 END MkConstant; 
@@ -855,7 +890,7 @@ END LoadVars;
 (* Adds all constants from a constant declaration list to "frame" *)
 PROCEDURE LoadConsts(consts: Ast.Branch; rv: Module; frame: Frame; scan: Lex.T);
 VAR i: INTEGER;
-    cd: Constant;
+    cd: TypeSym;
     br: Ast.Branch;
     id: Ast.Terminal;
     err: Ast.SrcError;
@@ -867,13 +902,15 @@ BEGIN
          ASSERT(br.kind = Ast.BkConstDeclaration);
          id := Ast.TermAt(br, 0);
          Lex.Extract(scan, id.tok, cd.name);
-         cd.exported := id.export;
-         err := EvalConstExpr(rv, frame, scan, Ast.GetChild(br, 1), cd.val);
+         cd.export := id.export;
+         err := EvalConstExpr(rv, frame, scan, Ast.GetChild(br, 1), cd.val^);
          IF err # NIL THEN
             AddErr(rv, err)
          ELSE
+            cd.ty := Ty.PrimitiveType(cd.val.kind);
             cd.next := frame.constants;
             frame.constants := cd
+            
          END
       END
    END
@@ -1010,37 +1047,6 @@ BEGIN
    END;
 END ReadConstVal;
 
-PROCEDURE WriteConstants(VAR w: BinWriter.T; con: Constant);
-VAR written: BOOLEAN;
-BEGIN
-   written := FALSE;
-   WHILE con # NIL DO
-      IF con.exported THEN
-         written := TRUE;
-         BinWriter.Bool(w, TRUE);
-         BinWriter.String(w, con.name);
-         WriteConstVal(w, con.val);
-      END;
-      con := con.next
-   END;
-   (* Must have empty mark if there are no items *)
-   IF ~written THEN BinWriter.Bool(w, FALSE) END
-END WriteConstants;
-
-PROCEDURE ReadConstants(VAR w: BinReader.T): Constant;
-VAR rv, con: Constant;
-BEGIN
-   rv := NIL;
-   WHILE BinReader.Cond(w) DO
-      con := MkConstant();
-      BinReader.String(w, con.name);
-      ReadConstVal(w, con.val);
-      con.next := rv;
-      rv := con
-   END;
-   RETURN rv
-END ReadConstants;
-
 PROCEDURE WriteTypeSyms(VAR w: BinWriter.T; ts: TypeSym);
 VAR written: BOOLEAN;
 BEGIN
@@ -1051,7 +1057,10 @@ BEGIN
          BinWriter.Bool(w, TRUE);
          BinWriter.I8(w, ts.kind);
          BinWriter.String(w, ts.name);
-         Ty.Write(w, ts.ty)
+         Ty.Write(w, ts.ty);
+         IF BinWriter.Cond(w, ts.val # NIL) THEN
+            WriteConstVal(w, ts.val^)
+         END
       END;
       ts := ts.next
    END;
@@ -1068,6 +1077,10 @@ BEGIN
       BinReader.I8(w, ts.kind);
       BinReader.String(w, ts.name);
       ts.ty := Ty.Read(w);
+      IF BinReader.Cond(w) THEN
+         NEW(ts.val);
+         ReadConstVal(w, ts.val^)
+      END;
       ts.next := rv;
       rv := ts
    END;
@@ -1079,7 +1092,7 @@ BEGIN
    BinWriter.I32(w, FrameMagic);
    BinWriter.I32(w, SYSTEM.VAL(INTEGER, fr.flags));
    WriteTypeSyms(w, fr.types);
-   WriteConstants(w, fr.constants);
+   WriteTypeSyms(w, fr.constants);
    WriteTypeSyms(w, fr.vars);
    WriteTypeSyms(w, fr.procedures);
 END WriteFrame;
@@ -1093,7 +1106,7 @@ BEGIN
    fr := MkFrame(mod, NIL);
    fr.flags := SYSTEM.VAL(SET, flags);
    fr.types := ReadTypeSyms(w);
-   fr.constants := ReadConstants(w);
+   fr.constants := ReadTypeSyms(w);
    fr.vars := ReadTypeSyms(w);
    fr.procedures := ReadTypeSyms(w);
    RETURN fr
@@ -1144,9 +1157,11 @@ BEGIN
             ts := ts.next
          END
       ELSE
-         Dbg.S("ERROR: could not load builtins symtab");
+         (* Fatal for most cases, but we allow it to continue.
+            This is necessary when bootstrapping and creating
+            the initial stubs in lib/stubs *)
+         Dbg.S("WARNING: could not load builtins symtab");
          Dbg.Ln;
-         ASSERT(FALSE)
       END
    END
 END LoadBuiltins;
@@ -1204,7 +1219,9 @@ VAR rv: Module;
 BEGIN
    LoadBuiltins();
    rv := MkModule();
-   rv.frame.searchNext := Builtins.frame;  (* Always in scope *)
+   IF Builtins # NIL THEN 
+      rv.frame.searchNext := Builtins.frame;  (* Always in scope *)
+   END;
    mod := ast(Ast.Branch);
    ASSERT(mod.kind = Ast.BkModule);
    term := Ast.TermAt(mod, Ast.ModuleName);
@@ -1219,7 +1236,10 @@ BEGIN
       rv.initBlock := MkFrame(rv, rv.frame);
       initBlockTs := MkTypeSym(tsProc);
       ptype := Ty.MkProcType();
-      ptype.body := initBlock;
+      ptype.body := Ast.MkProcedureBody();
+      Ast.AddChild(ptype.body, NIL);
+      Ast.AddChild(ptype.body, initBlock);
+      Ast.AddChild(ptype.body, NIL);
       initBlockTs.ty := ptype;
       initBlockTs.frame := rv.frame;
       rv.initBlock.procedures := initBlockTs

@@ -14,7 +14,7 @@ VAR srcFile, modName, outFile: Path.T;
    ast: Ast.T;
    mod: Symtab.Module;
    scstate: Semcheck.State;
-   i, res: INTEGER;
+   i, j, res: INTEGER;
    wr: BinWriter.T;
 BEGIN
    Dbg.S("Converting modules.");Dbg.Ln;
@@ -30,6 +30,7 @@ BEGIN
       Dbg.S("...");
       par := Par.NewFromFile(srcFile.str);
       ast := Par.ParseModule(par);
+      (* ast.ops.toStr(ast, par.scan.buf, 0); *)
       mod := Symtab.BuildModule(ast, par.scan);
       Semcheck.Init(scstate, mod, par.scan);
       IF Semcheck.Run(scstate) THEN
@@ -47,10 +48,14 @@ BEGIN
       ELSE
          Dbg.S("Failed");
       END;
-      Dbg.Ln;
-      FOR i := 0 TO mod.nofErrs-1 DO
-         Ast.Announce(mod.errs[i], par.curFile)
-      END
+      (* Dbg.Ln;Dbg.S("transformed");Dbg.Ln;
+      ast.ops.toStr(ast, par.scan.buf, 0);
+      Dbg.Ln; *)
+
+      FOR j := 0 TO mod.nofErrs-1 DO
+         Ast.Announce(mod.errs[j], par.curFile)
+      END;
+      Dbg.Ln
    END
 END Build;
 

@@ -11,6 +11,36 @@ TYPE
    END;
 VAR cfg: T;
 
+(* Hacky way to get the executable path.  If this goes wrong, 
+   it doesn't look to hard to add modules written in C to 
+   OBNC. *)
+PROCEDURE GetExePath(VAR p: Path.T); 
+VAR fh: Files.File;
+    rd: Files.Rider;
+    b: BYTE;
+    i: INTEGER;
+BEGIN
+   fh := Files.Old("/proc/self/maps");
+   Files.Set(rd, fh, 0);
+   (* Skip to first path on first line *)
+   REPEAT
+      Files.Read(rd, b)
+   UNTIL (b = 0) OR (b = ORD("/"));
+   IF b # 0 THEN
+      i := 0;
+      REPEAT
+         p.str[i] := CHR(b);
+         INC(i);
+         Files.Read(rd, b)
+      UNTIL b = 10;
+      p.len := i;
+      p.str[p.len] := 0X
+   END;
+   Files.Close(fh)
+END GetExePath;
+      
+
+
 (* Given a module name, returns the path to write the 
    symbtable to *)
 PROCEDURE ModOutFile*(modName: ARRAY OF CHAR; VAR dest: Path.T);
@@ -72,8 +102,10 @@ BEGIN
    FOR i := 0 TO LEN(cfg.modPaths)-1 DO
       Path.Zero(cfg.modPaths[i])
    END;
-   (* TODO - get exe dir from /proc/self and then base sysPath on that *)
-   Path.FromZ(cfg.sysPath, "./");
+   (* Base sys config dirs from exe location.  exeloc/../lib *)
+   GetExePath(cfg.sysPath);
+   Path.Drop(cfg.sysPath); Path.Drop(cfg.sysPath);
+   Path.Append(cfg.sysPath, "lib/");
    Env.Get("PWD", cfg.srcPaths[0].str, res); 
    ASSERT(res = 0);
    Path.Update(cfg.srcPaths[0]);

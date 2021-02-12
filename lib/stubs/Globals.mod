@@ -1,6 +1,8 @@
 (* Stub module used to generate symbol table entries for the 
    builtin functions supplied by Oberon.  *)
 MODULE Globals;
+TYPE
+   ANYREC* = POINTER TO ANY;
 
 PROCEDURE INC*(VAR i: INTEGER);
 BEGIN END INC;
@@ -18,8 +20,17 @@ PROCEDURE CHR*(i: INTEGER): CHAR;
 VAR c: CHAR;
 RETURN c END CHR;
 
+PROCEDURE INCL*(s: SET; i: INTEGER);
+BEGIN END INCL;
+
+PROCEDURE EXCL*(s: SET; i: INTEGER);
+BEGIN END EXCL;
+
 PROCEDURE ORD*(c: CHAR): INTEGER;
 BEGIN RETURN 0 END ORD;
+
+PROCEDURE NEW*(p: ANYREC);
+BEGIN END NEW;
 
 BEGIN
 END Globals.

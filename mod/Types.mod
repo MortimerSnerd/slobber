@@ -40,10 +40,10 @@ TYPE
       flags*: SET
    END;
    
+   (* Array type.  ARRAY 3, 4 OF CHAR == ARRAY 3 OF ARRAY 4 OF CHAR *)
    ArrayType* = POINTER TO ArrayTypeDesc;
    ArrayTypeDesc* = RECORD(TypeDesc)
-      dims*: ARRAY 16 OF INTEGER;
-      ndims*: INTEGER;
+      dim*: INTEGER;
       ty*: Type
    END;
 
@@ -208,7 +208,7 @@ BEGIN
    NEW(rv);
    rv.kind := KArray;
    rv.flags := {};
-   rv.ndims := 0;
+   rv.dim := 0;
    rv.ty := NIL
    RETURN rv
 END MkArrayType;
@@ -271,6 +271,20 @@ BEGIN
    RETURN rv
 END LookupPrimitiveType;
 
+PROCEDURE IsIntConvertible(kind: INTEGER): BOOLEAN;
+   RETURN (kind = KInteger) OR (kind = KByte)
+END IsIntConvertible;
+
+(* There is some limited amount of primitive conversion
+   that Oberon seems to allow for some of the primitive
+   integer based types.  Check and see if the two types
+   are allowed to be equal in the face of these conversions. 
+   For constants, semcheck will complain about obvious
+   data loss *)
+PROCEDURE IntTypesCanCoerceEqual(a, b: Type): BOOLEAN;
+   RETURN IsIntConvertible(a.kind) & IsIntConvertible(b.kind)
+END IntTypesCanCoerceEqual;
+
 (* Returns the type if the terminal is a literal of some kind *)
 PROCEDURE TypeForTerminal*(tok: Lex.Token): Type;
 VAR rv: Type;
@@ -294,8 +308,7 @@ BEGIN
          (* TODO - this is a memory leak.  We should keep up  
             with these somewhere so they can be freed *)
           arty := MkArrayType();
-          arty.ndims := 1;
-          arty.dims[0] := tok.len - 2 + 1; (* +1 for null, -2 to ignore quotes *)
+          arty.dim := tok.len - 2 + 1; (* +1 for null, -2 to ignore quotes *)
           arty.ty := PrimTyInstances[KChar];
           rv := arty
        END
@@ -370,8 +383,7 @@ END FindField;
 
 (* Writes a pretty version of a type to the debug output *)
 PROCEDURE DbgPrint*(t: Type; indent: INTEGER);
-VAR i: INTEGER;
-    art: ArrayType;
+VAR art: ArrayType;
     pt: PointerType;
     rt: RecordType;
     fld: RecordField;
@@ -390,10 +402,7 @@ BEGIN
    |KArray:
       Dbg.S("ARRAY ");
       art := t(ArrayType);
-      FOR i := 0 TO art.ndims-1 DO
-         Dbg.S(" ");
-         Dbg.I(art.dims[i])
-      END;
+      Dbg.I(art.dim);
       Dbg.Ln; DbgPrint(art.ty, indent+1)
    |KPointer:
       Dbg.S("POINTER"); Dbg.Ln;
@@ -469,12 +478,13 @@ VAR rv: BOOLEAN;
    f0, f1: RecordField;
    pt0, pt1: ProcType;
    r0, r1: ProcParam;
-   i: INTEGER;
 BEGIN
    IF (a = NIL) & (b = NIL) THEN
       rv := TRUE
    ELSIF (a = NIL) OR (b = NIL) THEN
       rv := FALSE
+   ELSIF IntTypesCanCoerceEqual(a, b) THEN
+      rv := TRUE
    ELSIF (a.kind = KTypeError) OR (b.kind = KTypeError) THEN
       rv := FALSE
    ELSIF (a.kind = KAny) OR (b.kind = KAny) THEN
@@ -489,12 +499,10 @@ BEGIN
       IF a.kind = KArray THEN
          art0 := a(ArrayType);
          art1 := b(ArrayType);
-         rv := (art0.ndims = art1.ndims) & Equal(art0.ty, art1.ty);
+         rv := Equal(art0.ty, art1.ty);
          IF rv THEN
-            FOR i := 0 TO art0.ndims-1 DO
-               IF art0.dims[i] # art1.dims[i] THEN
-                  rv := FALSE
-               END
+            IF ~(OpenArray IN art0.flags) & ~(OpenArray IN art1.flags) THEN
+               rv := art0.dim = art1.dim
             END
          END
 
@@ -575,7 +583,7 @@ VAR rv: BOOLEAN;
 BEGIN
    IF t.kind = KArray THEN
       art := t(ArrayType);
-      IF (art.ndims = 1) & (art.dims[0] = 2) & (art.ty.kind = KChar) THEN
+      IF (art.dim = 2) & (art.ty.kind = KChar) THEN
          rv := TRUE
       ELSE
          rv := FALSE
@@ -594,8 +602,7 @@ END IsStructured;
    read back later.
    TODO: do we only want to write the exported types? *)
 PROCEDURE Write*(VAR w: BinWriter.T; ty: Type);
-VAR i: INTEGER;
-    art: ArrayType;
+VAR art: ArrayType;
     rty: RecordType;
     rp: RecordField;
     pty: ProcType;
@@ -609,10 +616,7 @@ BEGIN
       (* Nothing else to do, the tag takes care of it *)
    |KArray:
       art := ty(ArrayType);
-      BinWriter.I8(w, art.ndims);
-      FOR i := 0 TO art.ndims-1 DO
-         BinWriter.I32(w, art.dims[i])
-      END;
+      BinWriter.I32(w, art.dim);
       Write(w, art.ty)
    |KPointer:
       Write(w, ty(PointerType).ty)
@@ -643,7 +647,7 @@ BEGIN
 END Write;
 
 PROCEDURE Read*(VAR r: BinReader.T): Type;
-VAR i, kind, vers, flags: INTEGER;
+VAR kind, vers, flags: INTEGER;
     art: ArrayType;
     rty: RecordType;
     rp: RecordField;
@@ -660,10 +664,7 @@ BEGIN
       rv := MkPrim(kind);
    |KArray:
       art := MkArrayType();
-      BinReader.I8(r, art.ndims);
-      FOR i := 0 TO art.ndims-1 DO
-         BinReader.I32(r, art.dims[i])
-      END;
+      BinReader.I32(r, art.dim);
       art.ty := Read(r);
       rv := art
    |KPointer:
@@ -704,6 +705,14 @@ BEGIN
    RETURN rv
 END Read;
 
+(* Given a type constant for a primitive type, 
+   returns an instance for it.  Returns NIL if
+   the type requested is not a primitive, but a 
+   structured type like an array record or pointer. *)
+PROCEDURE PrimitiveType*(kind: INTEGER): Type;
+   RETURN PrimTyInstances[kind]
+END PrimitiveType;
+
 PROCEDURE SetupTables();
 VAR arty: ArrayType;
     pty: PointerType;
@@ -725,8 +734,7 @@ BEGIN
    VoidType := MkPrim(KVoid);
    ErrorType := MkPrim(KTypeError);
    arty := MkArrayType();
-   arty.ndims := 1;
-   arty.dims[0] := 2;
+   arty.dim := 2;
    arty.ty := PrimTyInstances[KChar];
    ArrayChar2 := arty;
    BooleanType := PrimTyInstances[KBoolean];
