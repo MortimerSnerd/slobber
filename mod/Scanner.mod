@@ -154,8 +154,17 @@ END NewFromFile;
 
 (* Copies the string for `tok` to `dest` *)
 PROCEDURE Extract*(scan: T; tok: Token; VAR dest: ARRAY OF CHAR); 
+VAR i: INTEGER;
 BEGIN
-   Strings.Extract(scan.buf, tok.start, tok.len, dest)
+   ASSERT(tok.start < scan.len);
+   ASSERT((tok.start+tok.len) <= scan.len);
+   ASSERT(tok.len < LEN(dest));
+   (* We avoid using Strings.Extract here, because it calls
+      String.Length on the entire buffer every time *)
+   FOR i := 0 TO tok.len-1 DO
+      dest[i] := scan.buf[i+tok.start]
+   END;
+   dest[tok.len] := 0X
 END Extract;
 
 PROCEDURE IsWs(c: CHAR): BOOLEAN;

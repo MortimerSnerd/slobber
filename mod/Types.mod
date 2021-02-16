@@ -9,17 +9,23 @@ CONST
    (* Type kinds *)
    KByte*=0; KInteger*=1; KBoolean*=2; KReal*=3; KChar*=4; KSet*=5;
    KArray*=10; KPointer*=11; KRecord*=12; KTypeError*=13; KDeferredPtrTarget*=14;
-   KProcedure*=15;KVoid*=16;KAny*=17;
-
-   (* KAny - used for types for some builtin procedures, like LEN
-      that are sort of generic *)
+   KProcedure*=15;KVoid*=16;KAny*=17;KNamedRef*=18;KPrimName*=19;
+   NumTypeKinds=20;
+      (* KAny - used for types for some builtin procedures, like LEN
+         that are sort of generic.
+         KNamedRef - used to break cycles when writing a type out
+                     to a file.  Should not exist outside of 
+                     the serialized form 
+         KPrimName - for special SYSTEM functions that take a type name.
+         *)
   
 
    (* type flags *)
    Export*=0;Var*=1;OpenArray*=2;Builtin*=3;FromLiteral*=4;
+   Visited=5;
 
    MaxNameLen=64;
-   PrimLookupLen=KAny;
+   PrimLookupLen=NumTypeKinds;
 
    (* Version for the type format Write/Read can read *)
    BinFmtVer=200;
@@ -37,8 +43,16 @@ TYPE
    Type* = POINTER TO TypeDesc;
    TypeDesc* = RECORD
       kind*: INTEGER;
-      flags*: SET
-   END;
+      flags*: SET;
+      srcName*: POINTER TO QualName
+          (* The qualfied name of this type from the original src
+            module.  Used for error reporting and short-cutting
+            some type checks. If t1.srcName = t2.srcName, then
+            you can assume the types are equal.  But 
+            t1.srcName # t2.srcName does not mean the types
+            are not equal.  This is because types can be aliased
+            in a type section: TYPE t0=Mod.t4 *)
+  END;
    
    (* Array type.  ARRAY 3, 4 OF CHAR == ARRAY 3 OF ARRAY 4 OF CHAR *)
    ArrayType* = POINTER TO ArrayTypeDesc;
@@ -75,7 +89,7 @@ TYPE
    END;
 
    ProcType* = POINTER TO ProcTypeDesc;
-   ProcTypeDesc* = RECORD(Type)
+   ProcTypeDesc* = RECORD(TypeDesc)
       returnTy*: Type;
       params*: ProcParam;
       (* Pointer to the procedure body, if the procedure is 
@@ -84,7 +98,7 @@ TYPE
    END;
 
    DeferredTarget* = POINTER TO DeferredTargetDesc;
-   DeferredTargetDesc* = RECORD(Type)
+   DeferredTargetDesc* = RECORD(TypeDesc)
       (* Reference in AST for this decl *)
       ast*: Ast.T;
       (* Name of record this is a placeholder for. *) 
@@ -93,8 +107,22 @@ TYPE
 
    (* Associates a type with the node of a tree *)
    TypeNote* = POINTER TO TypeNoteDesc;
-   TypeNoteDesc* = RECORD(Ast.Annotation)
+   TypeNoteDesc* = RECORD(Ast.AnnotationDesc)
       ty*: Type
+   END;
+
+   SSType = POINTER TO SSTypeDesc;
+   SSTypeDesc = RECORD
+      name: QualName;
+      ty: Type;
+      next: SSType
+   END;
+
+   SerialState* = RECORD
+      (* State we use to break and reform loops when 
+         writing/reading types from a file *)
+      types: SSType
+         (* Named type references *)
    END;
 
 VAR
@@ -153,6 +181,7 @@ BEGIN
    NEW(rv);
    rv.kind := KProcedure;
    rv.flags := {};
+   rv.srcName := NIL;
    rv.returnTy := NIL;
    rv.params := NIL;
    rv.body := NIL;
@@ -165,6 +194,7 @@ BEGIN
    NEW(rv);
    rv.kind := KDeferredPtrTarget;
    rv.flags := {};
+   rv.srcName := NIL;
    rv.name := "";
    rv.ast := NIL
    RETURN rv
@@ -187,6 +217,7 @@ BEGIN
    NEW(rv);
    rv.kind := KRecord;
    rv.flags := {};
+   rv.srcName := NIL;
    rv.base := NIL;
    rv.fields := NIL
    RETURN rv
@@ -198,6 +229,7 @@ BEGIN
    NEW(rv);
    rv.kind := KPointer;
    rv.flags := {};
+   rv.srcName := NIL;
    rv.ty := NIL
    RETURN rv
 END MkPointerType;
@@ -208,6 +240,7 @@ BEGIN
    NEW(rv);
    rv.kind := KArray;
    rv.flags := {};
+   rv.srcName := NIL;
    rv.dim := 0;
    rv.ty := NIL
    RETURN rv
@@ -219,6 +252,7 @@ BEGIN
    NEW(rv);
    rv.kind := kind;
    rv.flags := {};
+   rv.srcName := NIL;
    RETURN rv
 END MkPrim;
 
@@ -254,7 +288,8 @@ BEGIN
    END
 END RevProcParam;
 
-(* The type, assuming tok is a type name like INTEGER *)
+(* The type, assuming tok is a type name like INTEGER.  Returns
+   ErrorType if not found. *)
 PROCEDURE LookupPrimitiveType*(scan: Lex.T; tok: Lex.Token): Type;
 VAR i: INTEGER;
     rv: Type;
@@ -271,7 +306,7 @@ BEGIN
    RETURN rv
 END LookupPrimitiveType;
 
-PROCEDURE IsIntConvertible(kind: INTEGER): BOOLEAN;
+PROCEDURE IsIntConvertible*(kind: INTEGER): BOOLEAN;
    RETURN (kind = KInteger) OR (kind = KByte)
 END IsIntConvertible;
 
@@ -334,6 +369,10 @@ PROCEDURE IsQualified*(n: QualName): BOOLEAN;
    RETURN n.module[0] # 0X
 END IsQualified;
 
+PROCEDURE QNEqual*(a, b: QualName): BOOLEAN;
+   RETURN Ast.StringEq(a.module, b.module) & Ast.StringEq(a.name, b.name)
+END QNEqual;
+
 PROCEDURE GetQualName*(b: Ast.Branch; scan: Lex.T; VAR dest: QualName);
 VAR t: Ast.T;
 BEGIN
@@ -347,6 +386,7 @@ BEGIN
       t := Ast.GetChild(b, 1);
       Lex.Extract(scan, t(Ast.Terminal).tok, dest.name)
    ELSE
+      Dbg.S("ERROR/BUG NOT A QUALIDENT"); Dbg.Ln;
       ASSERT(FALSE)
    END
 END GetQualName;
@@ -399,6 +439,7 @@ BEGIN
    |KReal: Dbg.S("REAL")
    |KChar: Dbg.S("CHAR")
    |KSet: Dbg.S("SET")
+   |KPrimName: Dbg.S("PRIMTYNAME")
    |KArray:
       Dbg.S("ARRAY ");
       art := t(ArrayType);
@@ -491,6 +532,11 @@ BEGIN
       rv := TRUE
    ELSIF a = b THEN
       rv := TRUE
+   ELSIF (a.srcName # NIL) & (b.srcName # NIL) 
+            & QNEqual(a.srcName^, b.srcName^) THEN
+      (* Having the same qualified type name is a shortcut for
+         equality *)
+      rv := TRUE
    ELSIF CharLiteralStringMatch(a, b) OR CharLiteralStringMatch(b, a) THEN
       rv := TRUE
    ELSIF a.kind # b.kind THEN
@@ -564,6 +610,25 @@ BEGIN
    RETURN rv
 END Equal;
 
+PROCEDURE IsSubtype*(a, b: Type): BOOLEAN;
+   (* Returns true if a is a subtype of b *)
+VAR rv: BOOLEAN;
+BEGIN
+   rv := FALSE;
+   a := DerefPointers(a);
+   b := DerefPointers(b);
+   IF (a.kind = KRecord) & (b.kind = KRecord) THEN
+      WHILE ~rv & (a # NIL) DO
+         IF Equal(a, b) THEN
+            rv := TRUE
+         ELSE
+            a := a(RecordType).base
+         END
+      END
+   END;
+   RETURN rv
+END IsSubtype;
+
 PROCEDURE IsRecord*(t: Type): BOOLEAN;
    RETURN t.kind = KRecord
 END IsRecord;
@@ -598,55 +663,102 @@ PROCEDURE IsStructured*(t: Type): BOOLEAN;
    RETURN IsRecord(t) OR (t.kind = KArray)
 END IsStructured;
 
+PROCEDURE IsPrimitive*(ty: Type): BOOLEAN;
+   RETURN (ty#NIL) & (PrimTyInstances[ty.kind] # NIL) 
+          & (ty.kind # KPrimName)
+END IsPrimitive;
+
+(* Prepares a SerialState to Read/Write type information *)
+PROCEDURE InitSerialState*(VAR ss: SerialState);
+BEGIN
+   ss.types := NIL
+END InitSerialState;
+
+PROCEDURE RememberSerType(ss: SerialState; qn: QualName): SSType;
+VAR rv: SSType;
+BEGIN
+   rv := ss.types;
+   WHILE (rv # NIL) & ~QNEqual(qn, rv.name) DO
+      rv := rv.next
+   END;
+   RETURN rv
+END RememberSerType;
+
+PROCEDURE NoteSerType(VAR ss: SerialState; ty: Type);
+VAR st: SSType;
+BEGIN
+   IF ty.srcName # NIL THEN
+      NEW(st);
+      st.name := ty.srcName^;
+      st.ty := ty;
+      st.next := ss.types;
+      ss.types := st
+   END
+END NoteSerType;
+      
 (* Writes a binary version of the type that can be 
-   read back later.
-   TODO: do we only want to write the exported types? *)
-PROCEDURE Write*(VAR w: BinWriter.T; ty: Type);
+   read back later.*)
+PROCEDURE Write*(VAR w: BinWriter.T; VAR ss: SerialState; ty: Type);
 VAR art: ArrayType;
     rty: RecordType;
     rp: RecordField;
     pty: ProcType;
     pp: ProcParam;
+    old: POINTER TO QualName;
 BEGIN
+   IF (ty.srcName # NIL) & (RememberSerType(ss, ty.srcName^) # NIL) THEN
+      (* We've already written this named type out, so now replace
+         further refrences with just a reference by name *)
+      old := ty.srcName;
+      ty := MkPrim(KNamedRef);
+      ty.srcName := old
+   ELSE
+      NoteSerType(ss, ty)
+   END;
+   EXCL(ty.flags, Visited);
    BinWriter.I32(w, BinFmtVer);
    BinWriter.I8(w, ty.kind);
    BinWriter.I32(w, SYSTEM.VAL(INTEGER, ty.flags));
+   IF BinWriter.Cond(w, ty.srcName # NIL) THEN
+      BinWriter.String(w, ty.srcName.module);
+      BinWriter.String(w, ty.srcName.name)
+   END;
    CASE ty.kind OF
-   KByte..KSet, KVoid, KAny:
+   KByte..KSet, KVoid, KAny,KNamedRef,KPrimName:
       (* Nothing else to do, the tag takes care of it *)
    |KArray:
       art := ty(ArrayType);
       BinWriter.I32(w, art.dim);
-      Write(w, art.ty)
+      Write(w, ss, art.ty)
    |KPointer:
-      Write(w, ty(PointerType).ty)
+      Write(w, ss, ty(PointerType).ty)
    |KRecord:
       rty := ty(RecordType);
       IF BinWriter.Cond(w, rty.base # NIL) THEN
-         Write(w, rty.base)
+         Write(w, ss, rty.base)
       END;
       rp := rty.fields;
       WHILE BinWriter.Cond(w, rp # NIL) DO
          BinWriter.String(w, rp.name);
-         Write(w, rp.ty);
+         Write(w, ss, rp.ty);
          BinWriter.Bool(w, rp.export);
          rp := rp.next
       END
    |KProcedure:
       pty := ty(ProcType);
       IF BinWriter.Cond(w, pty.returnTy # NIL) THEN
-         Write(w, pty.returnTy)
+         Write(w, ss, pty.returnTy)
       END;
       pp := pty.params;
       WHILE BinWriter.Cond(w, pp # NIL) DO
          BinWriter.String(w, pp.name);
-         Write(w, pp.ty);
+         Write(w, ss, pp.ty);
          pp := pp.next
       END
    END;
 END Write;
 
-PROCEDURE Read*(VAR r: BinReader.T): Type;
+PROCEDURE ReadImpl(VAR r: BinReader.T; VAR ss: SerialState): Type;
 VAR kind, vers, flags: INTEGER;
     art: ArrayType;
     rty: RecordType;
@@ -655,31 +767,48 @@ VAR kind, vers, flags: INTEGER;
     point: PointerType;
     pp: ProcParam;
     rv: Type;
+    sst: SSType;
+    qn: POINTER TO QualName;
 BEGIN
    BinReader.I32(r, vers); ASSERT(vers = BinFmtVer);
    BinReader.I8(r, kind);
    BinReader.I32(r, flags);
+   IF BinReader.Cond(r) THEN
+      NEW(qn);
+      BinReader.String(r, qn.module);
+      BinReader.String(r, qn.name)
+   ELSE
+      qn := NIL
+   END;
    CASE kind OF
-   KByte..KSet, KVoid, KAny:
+   KByte..KSet, KVoid, KAny,KPrimName:
       rv := MkPrim(kind);
+   |KNamedRef:
+      sst := RememberSerType(ss, qn^);
+      IF sst # NIL THEN
+         rv := sst.ty
+      ELSE
+         rv := MkPrim(KNamedRef);
+         rv.srcName := qn;
+      END
    |KArray:
       art := MkArrayType();
       BinReader.I32(r, art.dim);
-      art.ty := Read(r);
+      art.ty := ReadImpl(r, ss);
       rv := art
    |KPointer:
       point := MkPointerType();
-      point.ty :=  Read(r);
+      point.ty :=  ReadImpl(r, ss);
       rv := point
    |KRecord:
       rty := MkRecordType();
       IF BinReader.Cond(r) THEN
-         rty.base := Read(r)
+         rty.base := ReadImpl(r, ss)
       END;
       WHILE BinReader.Cond(r) DO
          rp := MkRecordField();
          BinReader.String(r, rp.name);
-         rp.ty := Read(r);
+         rp.ty := ReadImpl(r, ss);
          BinReader.Bool(r, rp.export);
          rp.next := rty.fields;
          rty.fields := rp
@@ -689,12 +818,12 @@ BEGIN
    |KProcedure:
       pty := MkProcType();
       IF BinReader.Cond(r) THEN
-         pty.returnTy := Read(r)
+         pty.returnTy := ReadImpl(r, ss)
       END;
       WHILE BinReader.Cond(r) DO
          pp := MkProcParam();
          BinReader.String(r, pp.name);
-         pp.ty := Read(r);
+         pp.ty := ReadImpl(r, ss);
          pp.next := pty.params;
          pty.params := pp
       END;
@@ -702,8 +831,105 @@ BEGIN
       rv := pty
    END;
    rv.flags := SYSTEM.VAL(SET, flags);
+   IF kind # KNamedRef THEN
+      rv.srcName := qn;
+      NoteSerType(ss, rv)
+   END;
    RETURN rv
+END ReadImpl;
+
+PROCEDURE FixupFwdRefs(ss: SerialState; ty: Type): Type;
+   (* Recursion is broken while writing with the NamedRef
+      entries.  This function re-connects the breaks
+      after a read. *)
+VAR rv: Type;
+    sst: SSType;
+    art: ArrayType;
+    pot: PointerType;
+    rty: RecordType;
+    rp: RecordField;
+    procty: ProcType;
+    pp: ProcParam;
+BEGIN
+   rv := ty;
+   IF ~(Visited IN ty.flags) THEN
+      INCL(ty.flags, Visited);
+      CASE ty.kind OF
+      KArray:
+         art := ty(ArrayType);
+         art.ty := FixupFwdRefs(ss, art.ty)
+      |KPointer:
+         pot := ty(PointerType);
+         pot.ty := FixupFwdRefs(ss, pot.ty)
+      |KRecord:
+         rty := ty(RecordType);
+         IF rty.base # NIL THEN
+            rty.base := FixupFwdRefs(ss, rty.base)
+         END;
+         rp := rty.fields;
+         WHILE rp # NIL DO
+            rp.ty := FixupFwdRefs(ss, rp.ty);
+            rp := rp.next
+         END
+      |KProcedure:
+         procty := ty(ProcType); 
+         IF procty.returnTy # NIL THEN
+            procty.returnTy := FixupFwdRefs(ss, procty.returnTy)
+         END;
+         pp := procty.params;
+         WHILE pp # NIL DO
+            pp.ty := FixupFwdRefs(ss, pp.ty);
+            pp := pp.next
+         END
+      |KByte..KSet,KVoid,KAny,KPrimName:
+      |KNamedRef:
+         sst := RememberSerType(ss,  ty.srcName^);
+         IF sst # NIL THEN
+            rv := sst.ty
+         ELSE
+            Dbg.S("Could not resolve type after read: ");
+            Dbg.S(ty.srcName.module); Dbg.S("."); Dbg.S(ty.srcName.name);
+            Dbg.Ln;
+            ASSERT(FALSE)
+         END
+      END;
+   END;
+   RETURN rv
+END FixupFwdRefs;
+
+PROCEDURE Read*(VAR r: BinReader.T; VAR ss: SerialState): Type;
+   (* Reads a type previously saved with Write() from a file *)
+VAR rv: Type;
+BEGIN
+   rv := ReadImpl(r, ss);
+   RETURN FixupFwdRefs(ss, rv)
 END Read;
+
+PROCEDURE AcceptPrimTyName*(t: Ast.T; scan: Lex.T): Type;
+   (* If t is qualident containing a primitive type name, 
+      it returns that type.  Returns NIL otherwise. *)
+VAR rv: Type;
+    br: Ast.Branch;
+    cld: Ast.T;
+    term: Ast.Terminal;
+BEGIN
+   rv := NIL;
+   IF t IS Ast.Branch THEN
+      br := t(Ast.Branch);
+      IF br.kind = Ast.BkQualIdent THEN
+         cld := Ast.GetChild(br, 0);
+         IF cld = NIL THEN
+            cld := Ast.GetChild(br, 1);
+            IF cld IS Ast.Terminal THEN
+               term := cld(Ast.Terminal);
+               rv := LookupPrimitiveType(scan, term.tok);
+               IF rv.kind = KTypeError THEN rv := NIL END
+            END
+         END
+      END
+   END
+   RETURN rv
+END AcceptPrimTyName;
 
 (* Given a type constant for a primitive type, 
    returns an instance for it.  Returns NIL if
@@ -716,20 +942,21 @@ END PrimitiveType;
 PROCEDURE SetupTables();
 VAR arty: ArrayType;
     pty: PointerType;
-   PROCEDURE PAssoc(i: INTEGER; n: ARRAY OF CHAR; k: INTEGER);
+   PROCEDURE PAssoc(n: ARRAY OF CHAR; k: INTEGER);
    BEGIN
-      PrimNames[i] := n;
-      PrimTyKinds[i] := k;
-      PrimTyInstances[i] := MkPrim(k)
+      PrimNames[k] := n;
+      PrimTyKinds[k] := k;
+      PrimTyInstances[k] := MkPrim(k)
    END PAssoc;
 BEGIN
-   PAssoc(0, "BYTE", KByte);
-   PAssoc(1, "INTEGER", KInteger);
-   PAssoc(2, "BOOLEAN", KBoolean);
-   PAssoc(3, "REAL", KReal);
-   PAssoc(4, "CHAR", KChar);
-   PAssoc(5, "SET", KSet);
-   PAssoc(6, "ANY", KAny);
+   PAssoc("BYTE", KByte);
+   PAssoc("INTEGER", KInteger);
+   PAssoc("BOOLEAN", KBoolean);
+   PAssoc("REAL", KReal);
+   PAssoc("CHAR", KChar);
+   PAssoc("SET", KSet);
+   PAssoc("ANY", KAny);
+   PAssoc("PRIMTYNAME",  KPrimName);
 
    VoidType := MkPrim(KVoid);
    ErrorType := MkPrim(KTypeError);

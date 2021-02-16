@@ -51,15 +51,18 @@ VAR ts: Symtab.TypeSym;
     wr: BinWriter.T;
     nty: Ty.Type;
     fname: ARRAY 128 OF CHAR;
+    ss: Ty.SerialState;
 BEGIN
    fname := "/tmp/tytest.bin";
    ts := mod.frame.types;
    WHILE ts # NIL DO
       IF BinWriter.Init(wr, fname) THEN
-         Ty.Write(wr, ts.ty);
+         Ty.InitSerialState(ss);
+         Ty.Write(wr, ss, ts.ty);
          BinWriter.Finish(wr);
          IF BinReader.Init(rd, fname) THEN
-            nty := Ty.Read(rd);
+            Ty.InitSerialState(ss);
+            nty := Ty.Read(rd, ss);
             BinReader.Finish(rd);
             IF ~Ty.Equal(ts.ty, nty) THEN
                Dbg.S("error: type not equal for ");
@@ -103,7 +106,7 @@ BEGIN
          END;
          Dbg.Ln;
          FOR i := 0 TO mod.nofErrs-1 DO
-            Ast.Announce(mod.errs[i], par.curFile)
+            Ast.Announce(mod.errs[i], par.scan, par.curFile)
          END
       END
    UNTIL fname[0] = 0X;

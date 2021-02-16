@@ -80,7 +80,7 @@ TYPE
    END;
 
    Terminal* = POINTER TO TerminalDesc;
-   TerminalDesc* = RECORD(T)
+   TerminalDesc* = RECORD(TreeDesc)
       tok*: Lex.Token;
       export*: BOOLEAN 
          (* valid for a terminal that's an IdentDef *)
@@ -92,7 +92,7 @@ TYPE
       BranchChunkSz, and maintains a linked list for extensions
       if more is necesary. See AddChild() and GetChild() for details.*)
    Branch* = POINTER TO BranchDesc;
-   BranchDesc* = RECORD(T)
+   BranchDesc* = RECORD(TreeDesc)
       kind*: INTEGER;
       startIx, childLen*: INTEGER;
       chld*: ARRAY BranchChunkSz OF T;
@@ -103,7 +103,12 @@ TYPE
    SrcError* = POINTER TO SrcErrorDesc;
    SrcErrorDesc* = RECORD
       msg*: ARRAY 128 OF CHAR;
-      pos*: SourcePos
+      pos*: SourcePos;
+      loc: T
+         (* We're lazy about looking up the source position
+            because not all errors will get presented
+            to the user.  If this is # NIL, then "pos"
+            hasn't been populated yet *)
    END;
 
    CaseIterator* = RECORD
@@ -753,34 +758,41 @@ BEGIN
    IF ~Walk(t, scan, pos) THEN pos.line := -1 END
 END Position;
 
-PROCEDURE MkSrcError*(msg: ARRAY OF CHAR; scan: Lex.T; 
-                       ast: T): SrcError;
-VAR rv: SrcError;
-    t: Terminal;
+PROCEDURE CalcPosition(VAR rv: SrcErrorDesc; scan: Lex.T);
+   (* Fills out the "pos" fields from the saved ast loc.
+      Needs to be called before an error is presented 
+      to the user, so the line and col will be present. *)
+VAR t: Terminal;
 BEGIN
-   NEW(rv);
-   rv.msg := msg;
-   IF ast IS Terminal THEN 
-      t := ast(Terminal);
+   IF rv.loc IS Terminal THEN 
+      t := rv.loc(Terminal);
       rv.pos.line := Lex.LineForPos(scan, t.tok.start);
       rv.pos.col := Lex.ColForPos(scan, t.tok.start);
       rv.pos.seek := t.tok.start
    ELSE 
-      Position(ast, scan, rv.pos)
+      Position(rv.loc, scan, rv.pos)
    END
+END CalcPosition;
+
+PROCEDURE MkSrcError*(msg: ARRAY OF CHAR; scan: Lex.T; 
+                       ast: T): SrcError;
+VAR rv: SrcError;
+BEGIN
+   NEW(rv);
+   rv.msg := msg;
+   rv.loc := ast
    RETURN rv
 END MkSrcError;
 
 (* Writes the error out to the console *)
-PROCEDURE Announce*(ee: SrcErrorDesc; file: ARRAY OF CHAR);
+PROCEDURE Announce*(VAR ee: SrcErrorDesc; scan: Lex.T; file: ARRAY OF CHAR);
 BEGIN
+   CalcPosition(ee, scan);
    Dbg.S(file); 
    Dbg.S("(");Dbg.I(ee.pos.line);Dbg.S(",");Dbg.I(ee.pos.col);Dbg.S(")");
    Dbg.S(": error: "); Dbg.S(ee.msg);
    Dbg.Ln
 END Announce;
-
-
 
 (* Finds the first child branch of t that has the
    kind of bKind.  Returns NIL if none found *)

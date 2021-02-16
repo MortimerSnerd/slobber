@@ -21,10 +21,18 @@ OBNCEXTSRC=~/src/obnc-libext-0.7.0/ext
 mkSym() {
    local log=/tmp/mksym.log
 
-   $MKEXE $* 2>&1 | tee $log
+   echo "$MKEXE $*"
+   $MKEXE $* 2>&1 > $log
+   if [ "$?" != "0" ]; then
+      echo ""
+      cat $log
+      echo "ERROR: Crash?"
+      exit 1
+   fi
    grep -i error $log
    if [ "$?" = "0" ]; then
       echo ""
+      cat $log
       echo "ERROR detected."
       exit 1
    fi
@@ -32,6 +40,7 @@ mkSym() {
    grep -i exception $log
    if [ "$?" = "0" ]; then
       echo ""
+      cat $log
       echo "EXCEPTION/ABORT detected."
       exit 1
    fi
@@ -50,7 +59,9 @@ mkSym $OBNCEXTSRC/extEnv.obn
 # List of files ordered so files that are imported come before
 # the files that import them.
 FILES="Path.mod Dbg.mod Config.mod BinReader.mod BinWriter.mod\
-       Scanner.mod Ast.mod Types.mod"
+       Scanner.mod Ast.mod Types.mod Symtab.mod Semcheck.mod\
+       Parser.mod DumpAst.mod MkSymtab.mod Render.mod TestParser.mod\
+       TestRender.mod TestScanner.mod TestSymtab.mod"
 
 for f in $FILES; do
    mkSym ../../mod/$f

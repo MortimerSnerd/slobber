@@ -52,10 +52,10 @@ BEGIN
       ast.ops.toStr(ast, par.scan.buf, 0);
       Dbg.Ln; *)
 
+      Dbg.Ln;
       FOR j := 0 TO mod.nofErrs-1 DO
-         Ast.Announce(mod.errs[j], par.curFile)
+         Ast.Announce(mod.errs[j], par.scan, par.curFile)
       END;
-      Dbg.Ln
    END
 END Build;
 

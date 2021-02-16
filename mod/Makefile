@@ -1,5 +1,5 @@
-EXES=TestScanner TestParser TestRender TestSymtab MkSymtab
-.PHONY: clean TestScanner TestParser TestRender TestSymtab MkSymtab
+EXES=TestScanner TestParser TestRender TestSymtab MkSymtab DumpAst
+.PHONY: clean TestScanner TestParser TestRender TestSymtab MkSymtab DumpAst
 all: $(EXES)
 
 TestScanner: 
@@ -16,6 +16,9 @@ TestSymtab:
 
 MkSymtab:
 	CFLAGS=-g obnc MkSymtab.mod
+
+DumpAst: 
+	CFLAGS=-g obnc DumpAst.mod
 
 clean:
 	rm -rf .obnc $(EXES) *.slo

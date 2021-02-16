@@ -112,6 +112,7 @@ BEGIN
    Path.AssertDir(cfg.srcPaths[0]);
    Path.Copy(cfg.srcPaths[0], cfg.modOutPath);
    Path.Copy(cfg.modOutPath, cfg.modPaths[0]);
+   Path.Copy(cfg.sysPath, cfg.modPaths[1]);
 END Init;
 
 BEGIN

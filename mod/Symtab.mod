@@ -83,7 +83,7 @@ TYPE
       imported modules *)
    Module* = POINTER TO ModuleDesc;
    ModuleDesc* = RECORD
-      name*: ARRAY MaxNameLen OF CHAR;
+      name*, localAlias*: ARRAY MaxNameLen OF CHAR;
       imports: Module;
          (* Linked list of imported modules *)
 
@@ -209,7 +209,7 @@ BEGIN
    x := cur.imports;
    rv := NIL;
    WHILE (rv = NIL) & (x # NIL) DO
-      IF Ast.StringEq(name, x.name) THEN
+      IF Ast.StringEq(name, x.localAlias) THEN
          rv := x
       ELSE
          x := x.importNext
@@ -404,6 +404,9 @@ BEGIN
       ELSE
          rv := Ast.MkSrcError("Could not parse real literal", scan, t)
       END      
+   ELSIF (t.tok.kind = Lex.KTRUE) OR (t.tok.kind = Lex.KFALSE) THEN
+      dest.kind := KBoolean;
+      dest.bval := t.tok.kind = Lex.KTRUE
    ELSE
       rv := Ast.MkSrcError("Unrecognized constant value", scan, t)
    END
@@ -763,7 +766,11 @@ BEGIN
     rt := Ty.MkRecordType();
     base := Ast.BranchAt(br, Ast.RecordBaseType);
     IF base # NIL THEN
-      err := CvtStrucType(mod, frame, base, scan, rt.base)
+      err := CvtStrucType(mod, frame, base, scan, rt.base);
+      IF (rt.base # NIL) & (rt.base.kind # Ty.KRecord) THEN
+         err := Ast.MkSrcError("Records must extend other records", 
+                               scan, base)
+      END
     END;
     IF err = NIL THEN
       flds := Ast.BranchAt(br, Ast.RecordFieldList);
@@ -977,6 +984,13 @@ BEGIN
    END
 END FixupDeferrals;
 
+PROCEDURE MkSrcName(ty: Ty.Type);
+BEGIN
+   NEW(ty.srcName);
+   ty.srcName.module[0] := 0X;
+   ty.srcName.name[0] := 0X
+END MkSrcName;
+
 (* Loads all of the types from "types" into "frame" *)
 PROCEDURE LoadTypes(types: Ast.Branch; mod: Module; frame: Frame; scan: Lex.T);
 VAR br: Ast.Branch;
@@ -998,6 +1012,9 @@ BEGIN
             t := Ast.TermAt(br, Ast.TypeDeclName);
             Lex.Extract(scan, t.tok, ty.name);
             ty.export := t.export;
+            MkSrcName(ty.ty);
+            Strings.Append(mod.name, ty.ty.srcName.module);
+            Strings.Append(ty.name, ty.ty.srcName.name);
             ty.next := frame.types;
             frame.types := ty
          ELSE
@@ -1047,28 +1064,26 @@ BEGIN
    END;
 END ReadConstVal;
 
-PROCEDURE WriteTypeSyms(VAR w: BinWriter.T; ts: TypeSym);
-VAR written: BOOLEAN;
+PROCEDURE WriteTypeSyms(VAR w: BinWriter.T; VAR ss: Ty.SerialState;
+                        ts: TypeSym);
 BEGIN
-   written := FALSE;
    WHILE ts # NIL DO
       IF ts.export THEN
-         written := TRUE;
          BinWriter.Bool(w, TRUE);
          BinWriter.I8(w, ts.kind);
          BinWriter.String(w, ts.name);
-         Ty.Write(w, ts.ty);
+         Ty.Write(w, ss, ts.ty);
          IF BinWriter.Cond(w, ts.val # NIL) THEN
             WriteConstVal(w, ts.val^)
          END
       END;
       ts := ts.next
    END;
-   (* Must write empty mark if there were no items *)
-   IF ~written THEN BinWriter.Bool(w, FALSE) END
+   (* Terminate with false entry *)
+   BinWriter.Bool(w, FALSE)
 END WriteTypeSyms;
 
-PROCEDURE ReadTypeSyms(VAR w: BinReader.T): TypeSym;
+PROCEDURE ReadTypeSyms(VAR w: BinReader.T; VAR ss: Ty.SerialState): TypeSym;
 VAR rv, ts: TypeSym;
 BEGIN
    rv := NIL;
@@ -1076,7 +1091,7 @@ BEGIN
       ts := MkTypeSym(0);
       BinReader.I8(w, ts.kind);
       BinReader.String(w, ts.name);
-      ts.ty := Ty.Read(w);
+      ts.ty := Ty.Read(w, ss);
       IF BinReader.Cond(w) THEN
          NEW(ts.val);
          ReadConstVal(w, ts.val^)
@@ -1087,17 +1102,19 @@ BEGIN
    RETURN rv
 END ReadTypeSyms;
 
-PROCEDURE WriteFrame(VAR w: BinWriter.T; fr: Frame);
+PROCEDURE WriteFrame(VAR w: BinWriter.T; VAR ss: Ty.SerialState;
+                     fr: Frame);
 BEGIN
    BinWriter.I32(w, FrameMagic);
    BinWriter.I32(w, SYSTEM.VAL(INTEGER, fr.flags));
-   WriteTypeSyms(w, fr.types);
-   WriteTypeSyms(w, fr.constants);
-   WriteTypeSyms(w, fr.vars);
-   WriteTypeSyms(w, fr.procedures);
+   WriteTypeSyms(w, ss, fr.types);
+   WriteTypeSyms(w, ss, fr.constants);
+   WriteTypeSyms(w, ss, fr.vars);
+   WriteTypeSyms(w, ss, fr.procedures);
 END WriteFrame;
 
-PROCEDURE ReadFrame(VAR w: BinReader.T; mod: Module): Frame;
+PROCEDURE ReadFrame(VAR w: BinReader.T; VAR ss: Ty.SerialState;
+                    mod: Module): Frame;
 VAR fr: Frame;
     mag, flags: INTEGER;
 BEGIN
@@ -1105,10 +1122,10 @@ BEGIN
    BinReader.I32(w, flags);
    fr := MkFrame(mod, NIL);
    fr.flags := SYSTEM.VAL(SET, flags);
-   fr.types := ReadTypeSyms(w);
-   fr.constants := ReadTypeSyms(w);
-   fr.vars := ReadTypeSyms(w);
-   fr.procedures := ReadTypeSyms(w);
+   fr.types := ReadTypeSyms(w, ss);
+   fr.constants := ReadTypeSyms(w, ss);
+   fr.vars := ReadTypeSyms(w, ss);
+   fr.procedures := ReadTypeSyms(w, ss);
    RETURN fr
 END ReadFrame;
 
@@ -1116,11 +1133,13 @@ END ReadFrame;
    This acts as an interface file that we can load to resolve
    names and types for imported modules when compiling *)
 PROCEDURE Write*(VAR w: BinWriter.T; mod: Module);
+VAR ss: Ty.SerialState;
 BEGIN
+   Ty.InitSerialState(ss);
    BinWriter.String(w, FileMagic);
    BinWriter.I32(w, SymtabVer);
    BinWriter.String(w, mod.name);
-   WriteFrame(w, mod.frame);
+   WriteFrame(w, ss, mod.frame);
 END Write;
 
 (* Reads the previously saved symtab for a module.  Contains just
@@ -1129,14 +1148,17 @@ PROCEDURE Read*(VAR w: BinReader.T): Module;
 VAR mod: Module;
     mag: ARRAY 5 OF CHAR;
     ver: INTEGER;
+    ss: Ty.SerialState;
 BEGIN
+   Ty.InitSerialState(ss);
    mod := MkModule();
    BinReader.String(w, mag);
    ASSERT(Ast.StringEq(mag, FileMagic));
    BinReader.I32(w, ver);
    ASSERT(ver = SymtabVer);
    BinReader.String(w, mod.name);
-   mod.frame := ReadFrame(w, mod);
+   mod.localAlias := mod.name;
+   mod.frame := ReadFrame(w, ss, mod);
    RETURN mod
 END Read;
 
@@ -1180,7 +1202,6 @@ BEGIN
       FOR i := 0 TO imps.childLen-1 DO
          imp := Ast.BranchAt(imps, i);
          mname := Ast.TermAt(imp, 1);
-         (* TODO should we keep up with original module name? *)
          Lex.Extract(scan, mname.tok, modname);
          IF Config.FindModPath(modname, spath) THEN
             IF BinReader.Init(rd, spath.str) THEN
@@ -1189,7 +1210,7 @@ BEGIN
                mname := Ast.TermAt(imp, 0);
                IF mname # NIL THEN
                   (* Alias *)
-                  Lex.Extract(scan, mname.tok, mod.name)
+                  Lex.Extract(scan, mname.tok, mod.localAlias)
                END;
                mod.importNext := rv.imports;
                rv.imports := mod;

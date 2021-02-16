@@ -1,7 +1,7 @@
 (* Semantic checking and desugaring passes for the AST *)
 MODULE Semcheck;
 IMPORT
-   Ast, Symtab, Lex := Scanner, Ty:=Types;
+   Ast, Dbg, Symtab, Lex := Scanner, Ty:=Types;
 
 TYPE
    State* = RECORD
@@ -23,12 +23,6 @@ PROCEDURE AddErr(st: State; msg: ARRAY OF CHAR; loc: Ast.T);
 BEGIN
    Symtab.AddErr(st.mod, Ast.MkSrcError(msg, st.scan, loc))
 END AddErr;
-
-(* TODO need some special casing for some of the SYSTEM module
-   functions for both ExpressionType() and CheckCall. 
-   Ex: SYSTEM.SIZE(REAL):INTEGER, and SYSTEM.VAL(X, someExpr):X. 
-   Can't pass types as function parameters, so we can't do these in 
-   stubs, but need to special case them *)
 
 (* Steps through a designator to see what the end type will be once all
    of the selectors are applied. Adds type annotations to the selectors
@@ -123,10 +117,65 @@ BEGIN
    RETURN rv
 END DesignatorType;
 
+(* Returns the type of the selector indexed by "selIx" in the 
+   designator *)
+PROCEDURE DesignatorSelectorType(mod: Symtab.Module; scope: Symtab.Frame; 
+                                 desig: Ast.Branch; selIx: INTEGER; 
+                                 scan: Lex.T; VAR err: Ast.SrcError): Ty.Type;
+VAR rv: Ty.Type;
+    note: Ty.TypeNote;
+BEGIN
+   (* Take advantage of the fact that DesignatorType memoizes the 
+      selector types as it goes, so this doesn't cost us much if
+      it's already been done on this designator *)
+   rv := DesignatorType(mod, scope, desig, scan, err);
+   note := Ty.Remember(Ast.BranchAt(desig, selIx));
+   IF note # NIL THEN
+      rv := note.ty
+   ELSE
+      rv := NIL
+   END;
+   RETURN rv
+END DesignatorSelectorType;
+
 PROCEDURE IsCompare(tk: Lex.TokKind): BOOLEAN;
    RETURN (Lex.tfRelational IN Lex.TokenFlags[tk])
           OR (tk = Lex.KOR) OR (tk = Lex.AMPERSAND)
 END IsCompare;
+
+PROCEDURE NthCallParam(t: Ast.Branch; n: INTEGER): Ast.T;
+   (* If t is a call, and has a nth parameter, returns
+      it.  Returns NIL otherwise *)
+VAR rv: Ast.T;
+    expLst: Ast.Branch;
+BEGIN
+   IF t.kind = Ast.BkCall THEN
+      expLst := Ast.BranchAt(t, Ast.CallParams);
+      IF (expLst # NIL) & (expLst.childLen > n) THEN
+         rv := Ast.GetChild(expLst, n)
+      ELSE
+         rv := NIL
+      END 
+   ELSE
+      rv := NIL
+   END
+   RETURN rv
+END NthCallParam;
+
+PROCEDURE IsSystemValCall(calldesig: Ast.Branch; scan: Lex.T): BOOLEAN;
+VAR rv: BOOLEAN;
+    qident: Ast.Branch;
+    qn: Ty.QualName;
+BEGIN
+   IF calldesig.childLen = 1 THEN
+      qident := Ast.BranchAt(calldesig, Ast.DesignatorQIdent);
+      Ty.GetQualName(qident, scan, qn);
+      rv := Ast.StringEq(qn.module, "SYSTEM");
+   ELSE
+      rv := FALSE
+   END
+   RETURN rv
+END IsSystemValCall;
 
 (* Returns the type for an expression.  If the ast reprensents something
    typeless, like an IF statement, returns a KVoid type.  If there's
@@ -138,8 +187,9 @@ PROCEDURE ExpressionType(mod: Symtab.Module; scope: Symtab.Frame;
                          VAR err: Ast.SrcError): Ty.Type;
 VAR rv, lhs, rhs: Ty.Type;
     term: Ast.Terminal;
-    br: Ast.Branch;
+    br, calldesig: Ast.Branch;
     procTy: Ty.ProcType;
+    param: Ast.T;
 BEGIN
    rv := Ty.VoidType;
    IF t IS Ast.Terminal THEN
@@ -149,18 +199,20 @@ BEGIN
       br := t(Ast.Branch);
       IF br.kind = Ast.BkUnOp THEN
          rv := ExpressionType(mod, scope, Ast.GetChild(br, 1), scan, err)
-
       ELSIF br.kind = Ast.BkSet THEN
          rv := Ty.PrimitiveType(Ty.KSet)
       ELSIF br.kind = Ast.BkParenExpr THEN
          rv := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err)
-
       ELSIF br.kind = Ast.BkBinOp THEN
          term := Ast.TermAt(br, 1);
          IF term.tok.kind = Lex.COLEQ THEN
             (* The type checking for assigments is left up to 
                CheckAssignment() *)
             rv := Ty.VoidType
+         ELSIF (term.tok.kind = Lex.KIS) OR (term.tok.kind = Lex.KIN) THEN
+            (* Just boolean.  We don't check the types here, CheckExpression
+               will do that just once *)
+            rv := Ty.PrimitiveType(Ty.KBoolean)
          ELSE
             lhs := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err);
             IF err = NIL THEN
@@ -182,15 +234,45 @@ BEGIN
          END
       ELSIF br.kind = Ast.BkCall THEN
          (* We only check the expression type here, not whether
-            the call parameters are properly typed *)
-         lhs := ExpressionType(mod, scope, Ast.BranchAt(br, Ast.CallDesignator), 
-                               scan, err);
+            the call parameters are properly typed. The one expression
+            is for SYSTEM.VAL, where the return type is the type named
+            in the first parameter. *)
+         calldesig := Ast.BranchAt(br, Ast.CallDesignator);
+         lhs := ExpressionType(mod, scope, calldesig, scan, err);
          IF lhs.kind = Ty.KProcedure THEN
             procTy := lhs(Ty.ProcType);
             IF procTy.returnTy = NIL THEN
                rv := Ty.VoidType
             ELSE
-               rv := procTy.returnTy
+               IF (procTy.returnTy.kind = Ty.KAny) 
+                     & IsSystemValCall(calldesig, scan) THEN
+                  param := NthCallParam(br, 0);
+                  rv := NIL;
+                  IF (param # NIL) & (param IS Ast.Branch) THEN
+                     rv := Ty.AcceptPrimTyName(
+                        Ast.BranchAt(param(Ast.Branch), 0), scan);
+                  END;
+                  IF rv = NIL THEN
+                     err := Ast.MkSrcError(
+                        "Expecting primitive type name", scan, param)
+                  END;
+                  IF err = NIL THEN
+                     param := NthCallParam(br, 1);
+                     IF param = NIL THEN
+                        err := Ast.MkSrcError(
+                           "VAL needs two parameters.", scan, calldesig)
+                     ELSE
+                        lhs := ExpressionType(mod, scope, param, scan, err);
+                        IF ~Ty.IsPrimitive(lhs) THEN
+                           err := Ast.MkSrcError(
+                              "2nd argument of VAL should be a primitive type",
+                              scan, param)
+                        END
+                     END
+                  END
+               ELSE
+                  rv := procTy.returnTy;
+               END
             END
          ELSE
             err := Ast.MkSrcError("LHS of '(' is not a function type.", 
@@ -249,20 +331,26 @@ END LastIsTypeGuard;
 PROCEDURE FixupTyGuardFunctions(st: State; proc: Symtab.TypeSym; 
                                 br: Ast.Branch; n: INTEGER);
 VAR desig, tguard, param, newCall, callParams, parmDesig: Ast.Branch;
+    lhsTy: Ty.Type;
+    err: Ast.SrcError;
 BEGIN
    desig := Ast.BranchAt(br, n);
    IF LastIsTypeGuard(desig) THEN
-      tguard := Ast.BranchAt(desig, desig.childLen-1);
-      param := Ast.BranchAt(tguard, 0);
-      Ast.DropLast(desig);
-      parmDesig := Ast.MkDesignator();
-      Ast.AddChild(parmDesig, param);
-      callParams := Ast.MkExpList();
-      Ast.AddChild(callParams, parmDesig);
-      newCall := Ast.MkCall();
-      Ast.AddChild(newCall, desig);
-      Ast.AddChild(newCall, callParams);
-      Ast.SetChild(br, n, newCall)
+      lhsTy := DesignatorSelectorType(st.mod, proc.frame, desig,
+                                      desig.childLen - 2, st.scan, err);
+      IF (lhsTy # NIL) & (lhsTy.kind = Ty.KProcedure) THEN
+         tguard := Ast.BranchAt(desig, desig.childLen-1);
+         param := Ast.BranchAt(tguard, 0);
+         Ast.DropLast(desig);
+         parmDesig := Ast.MkDesignator();
+         Ast.AddChild(parmDesig, param);
+         callParams := Ast.MkExpList();
+         Ast.AddChild(callParams, parmDesig);
+         newCall := Ast.MkCall();
+         Ast.AddChild(newCall, desig);
+         Ast.AddChild(newCall, callParams);
+         Ast.SetChild(br, n, newCall)
+      END
    END
 END FixupTyGuardFunctions;
 
@@ -274,16 +362,18 @@ PROCEDURE Pass0Proc(st: State; proc: Symtab.TypeSym);
    BEGIN
       IF br.kind = Ast.BkDesignator THEN
          FixupDesignator(st, proc, br)
-      END;
-      FOR i := 0 TO br.childLen-1 DO
-         n := Ast.GetChild(br, i);
-         IF n IS Ast.Branch THEN
-            chld := n(Ast.Branch);
-            IF chld.kind = Ast.BkDesignator THEN
-               FixupTyGuardFunctions(st, proc, br, i);
-               chld := Ast.BranchAt(br, i)
-            END;
-            Walk(st, proc, chld)
+      ELSE
+         FOR i := 0 TO br.childLen-1 DO
+            n := Ast.GetChild(br, i);
+            IF n IS Ast.Branch THEN
+               chld := n(Ast.Branch);
+               IF chld.kind = Ast.BkDesignator THEN
+                  FixupDesignator(st, proc, chld);
+                  FixupTyGuardFunctions(st, proc, br, i);
+                  chld := Ast.BranchAt(br, i)
+               END;
+               Walk(st, proc, chld)
+            END
          END
       END
    END Walk;
@@ -340,13 +430,23 @@ BEGIN
                    paramExp);
             done := TRUE       
          ELSE
-            expTy := ExpressionType(st.mod, proc.frame, paramExp, 
-                                    st.scan, err);
-            IF err # NIL THEN
-               Symtab.AddErr(st.mod, err)
-            END;
-            IF ~Ty.Equal(expTy, param.ty) THEN
-               AddErr(st, "Mismatched proc parameter type.", paramExp)
+            IF param.ty.kind = Ty.KPrimName THEN
+               expTy := Ty.AcceptPrimTyName(Ast.BranchAt(paramExp(Ast.Branch), 0),
+                                            st.scan);
+               IF expTy = NIL THEN
+                  AddErr(st, "Expecting a primitive type name.",
+                         paramExp)
+               END
+            ELSE
+               expTy := ExpressionType(st.mod, proc.frame, paramExp, 
+                                       st.scan, err);
+               IF err # NIL THEN
+                  Symtab.AddErr(st.mod, err)
+               END;
+               IF ~Ty.Equal(expTy, param.ty) 
+                     & ~Ty.IsSubtype(expTy, param.ty) THEN
+                  AddErr(st, "Mismatched proc parameter type.", paramExp)
+               END;
             END;
             param := param.next;
             INC(i)
@@ -359,16 +459,78 @@ BEGIN
    END;
 END CheckCall;
 
+PROCEDURE CheckIsExpr(st: State; proc: Symtab.TypeSym; expr: Ast.Branch);
+VAR lty: Ty.Type;
+    rty: Symtab.TypeSym;
+    err: Ast.SrcError;
+    qn: Ty.QualName;
+    rhs: Ast.Branch;
+BEGIN
+   lty := ExpressionType(st.mod, proc.frame, Ast.GetChild(expr, 0), 
+                         st.scan, err);
+   IF err = NIL THEN 
+      rhs := Ast.BranchAt(expr, 2);
+      IF rhs.kind = Ast.BkDesignator THEN
+         Ty.GetQualName(Ast.BranchAt(rhs, Ast.DesignatorQIdent), 
+                        st.scan, qn);
+         rty := Symtab.FindType(st.mod, proc.frame, qn);
+         IF rty # NIL THEN
+            IF ~Ty.IsSubtype(rty.ty, lty) THEN
+               AddErr(st, "Can not be true, types are disjoint",
+                      Ast.GetChild(expr, 1))
+            END
+         ELSE
+            AddErr(st, "Type not found.", rhs)
+         END
+      ELSE
+         AddErr(st, "Expecting a type designator on RHS of IS", rhs)
+      END;
+   ELSE
+      Symtab.AddErr(st.mod, err)
+   END
+END CheckIsExpr;
+
+PROCEDURE CheckInExpr(st: State; proc: Symtab.TypeSym; expr: Ast.Branch);
+VAR ty: Ty.Type;
+    err: Ast.SrcError;    
+BEGIN
+   ty := ExpressionType(st.mod, proc.frame, Ast.GetChild(expr, 0), 
+                        st.scan, err);
+   IF err = NIL THEN
+      IF Ty.IsIntConvertible(ty.kind) THEN
+         ty := ExpressionType(st.mod, proc.frame, Ast.GetChild(expr, 2), 
+                              st.scan, err);
+         IF (err = NIL) & (ty.kind # Ty.KSet) THEN
+            AddErr(st, "RHS of IN must be a SET", 
+                   Ast.GetChild(expr, 2))
+         END
+      ELSE
+         AddErr(st, "LHS of IN must be a integer.", expr)
+      END
+   END;
+   IF err # NIL THEN
+      Symtab.AddErr(st.mod, err)   
+   END;
+END CheckInExpr;
+
 (* Recursively walk expression checking any calls.  Type checking for
    operators is already done at this point *)
 PROCEDURE CheckExpression(st: State; proc: Symtab.TypeSym; expr: Ast.T);
 VAR i: INTEGER;
     br: Ast.Branch;
+    operator: Ast.Terminal;
 BEGIN
    IF expr IS Ast.Branch THEN
       br := expr(Ast.Branch);
       IF br.kind = Ast.BkCall THEN
          CheckCall(st, proc, br)
+      ELSIF br.kind = Ast.BkBinOp THEN
+         operator := Ast.TermAt(br, 1);
+         IF operator.tok.kind = Lex.KIS THEN
+            CheckIsExpr(st, proc, br)
+         ELSIF operator.tok.kind = Lex.KIN THEN
+            CheckInExpr(st, proc, br)
+         END 
       END;
       FOR i := 0 TO br.childLen-1 DO
          CheckExpression(st, proc, Ast.GetChild(br, i))
@@ -392,6 +554,21 @@ BEGIN
    END
 END GetLabelInt;
 
+PROCEDURE CheckCaseConstant(st: State; proc: Symtab.TypeSym; lab: Ast.T);
+VAR ts: Symtab.TypeSym;
+    qn: Ty.QualName;
+BEGIN
+   Ty.GetQualName(lab(Ast.Branch), st.scan, qn); 
+   ts := Symtab.FindConst(st.mod, proc.frame, qn);
+   IF ts = NIL THEN
+      AddErr(st, "Could not find constant.", lab)
+   ELSIF ~Ty.IsIntConvertible(ts.val.kind) 
+            & (ts.val.kind # Ty.KChar) THEN
+      AddErr(st, "Expecting a integer or char constant.", 
+             lab)
+   END
+END CheckCaseConstant;
+
 PROCEDURE CheckCases(st: State; proc: Symtab.TypeSym; stmt: Ast.Branch);
 VAR iter: Ast.CaseIterator;
     body, labelRange, case: Ast.Branch;
@@ -406,8 +583,8 @@ BEGIN
       WHILE Ast.HasAnotherLabelRange(iter) DO
          labelRange := Ast.NextLabelRange(iter);
          lab := Ast.GetChild(labelRange, 0);
-         IF ~(lab IS Ast.Terminal) THEN
-            AddErr(st, "Was expecting a integer or char for the label.", lab)
+         IF lab IS Ast.Branch THEN
+            CheckCaseConstant(st, proc, lab)
          ELSE
             IF labelRange.childLen > 1 THEN
                GetLabelInt(st, lab(Ast.Terminal), err, lval);
@@ -415,8 +592,8 @@ BEGIN
                   Symtab.AddErr(st.mod, err)
                ELSE
                   lab := Ast.GetChild(labelRange, 1);
-                  IF ~(lab IS Ast.Terminal) THEN
-                     AddErr(st, "Was expecting a integer or char for the label.", lab)             
+                  IF lab IS Ast.Branch THEN
+                     CheckCaseConstant(st, proc, lab)
                   ELSE
                      GetLabelInt(st, lab(Ast.Terminal), err, rval);
                      IF err # NIL THEN
@@ -556,9 +733,9 @@ BEGIN
 END CheckWhileStmt;
 
 PROCEDURE CheckRepeatStmt(st: State; proc: Symtab.TypeSym; stmt: Ast.Branch);
-VAR expr: Ast.Branch;
+VAR expr: Ast.T;
 BEGIN
-   expr := Ast.BranchAt(stmt, Ast.RepeatStmtCond);
+   expr := Ast.GetChild(stmt, Ast.RepeatStmtCond);
    ExprShouldBeBoolean(st, proc, expr);
    CheckExpression(st, proc, expr);
    Pass1StmtSeq(st, proc, Ast.BranchAt(stmt, Ast.RepeatStmtBody))
@@ -673,6 +850,11 @@ BEGIN
       ELSE
          nomatch := TRUE
       END
+   ELSIF (tyl.kind = Ty.KPointer) & (tyr.kind = Ty.KPointer) THEN
+      IF ~Ty.IsSubtype(tyr, tyl) THEN
+         AddErr(st, "RHS is not a subtype of LHS of assignment", 
+                lhs)
+      END
    ELSE
       nomatch := TRUE;
    END;
@@ -696,6 +878,7 @@ BEGIN
    IF ~IsLocWritable(st, proc, desig) THEN
       AddErr(st, "LHS of assignment is not writable.", desig)
    ELSE
+      CheckExpression(st, proc, rhs);
       tyl := DesignatorType(st.mod, proc.frame, desig, st.scan, err);
       IF err = NIL THEN
          tyr := ExpressionType(st.mod, proc.frame, rhs, st.scan, err);
