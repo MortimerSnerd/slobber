@@ -111,7 +111,7 @@ BEGIN
          import := import.importNext
       END
    ELSE
-      Dbg.S("Could not load symbol file for "); 
+      Dbg.S("ERROR: Could not load symbol file for "); 
       Dbg.S(modPath.str); Dbg.Ln;
       rv := FALSE
   END
@@ -132,7 +132,7 @@ BEGIN
       IF Config.FindSrclessModPath(modName, src) THEN
          rv := AddSymtabDeps(ds, src)
       ELSE
-         Dbg.S("Could not find source for module ");
+         Dbg.S("ERROR: Could not find source for module ");
          Dbg.S(modName); Dbg.S(".");Dbg.Ln;
          rv := FALSE
       END
@@ -187,6 +187,7 @@ PROCEDURE MarkDependees(ds: DepState; ml: ModList);
 VAR i:INTEGER;
 BEGIN
    INC(ml.dirtyWalk);
+   INCL(ml.flags, MLNeedsBuild);
    FOR i := 0 TO ds.numDeps-1 DO
       IF ds.deps[i].to = ml.id THEN
          MarkDependees(ds, ModFor(ds, ds.deps[i].from))
@@ -213,7 +214,7 @@ BEGIN
    IF Config.FindModPath(ml.name, modpath) THEN
       GetModTime(ml.src, srcT, srcD);
       GetModTime(modpath, modT, modD);
-      rv := (srcD > modD) OR (srcT > modT)  
+      rv := (srcD > modD) OR ((srcD = modD) & (srcT > modT))  
    ELSE
       rv := TRUE
    END

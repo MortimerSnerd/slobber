@@ -84,10 +84,10 @@ TYPE
    Module* = POINTER TO ModuleDesc;
    ModuleDesc* = RECORD
       name*, localAlias*: ARRAY MaxNameLen OF CHAR;
-      imports: Module;
+      imports*: Module;
          (* Linked list of imported modules *)
 
-      importNext: Module;
+      importNext*: Module;
          (* link for list of module imports *)
 
       frame*: Frame;
@@ -1129,6 +1129,33 @@ BEGIN
    RETURN fr
 END ReadFrame;
 
+PROCEDURE WriteImportList(VAR w: BinWriter.T; mod: Module);
+   (* Writes just the names of the imported modules. 
+      Just used to chase down dependencies. *)
+VAR m: Module;
+BEGIN
+   m := mod.imports;
+   WHILE BinWriter.Cond(w, m # NIL) DO
+      BinWriter.String(w, m.name);
+      m := m.importNext
+   END
+END WriteImportList;
+
+PROCEDURE ReadImportList(VAR w: BinReader.T; mod: Module);
+   (* Reads a skeleton import list.  The modules are empty, 
+      and just have the import names, enough for 
+      dependency chasing. *)
+VAR m: Module;
+BEGIN
+   mod.imports := NIL;
+   WHILE BinReader.Cond(w) DO
+      NEW(m);
+      BinReader.String(w, m.name);
+      m.importNext := mod.imports;
+      mod.imports := m
+   END
+END ReadImportList; 
+
 (* Writes out a symbol table that contains just the public members.
    This acts as an interface file that we can load to resolve
    names and types for imported modules when compiling *)
@@ -1139,6 +1166,7 @@ BEGIN
    BinWriter.String(w, FileMagic);
    BinWriter.I32(w, SymtabVer);
    BinWriter.String(w, mod.name);
+   WriteImportList(w, mod);
    WriteFrame(w, ss, mod.frame);
 END Write;
 
@@ -1158,6 +1186,7 @@ BEGIN
    ASSERT(ver = SymtabVer);
    BinReader.String(w, mod.name);
    mod.localAlias := mod.name;
+   ReadImportList(w, mod);
    mod.frame := ReadFrame(w, ss, mod);
    RETURN mod
 END Read;

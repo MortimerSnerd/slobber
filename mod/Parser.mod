@@ -1150,7 +1150,9 @@ END ParseImportList;
 
 (* module = MODULE ident ";" [ImportList] DeclarationSequence
             [BEGIN StatementSequence] END ident "." *)
-PROCEDURE ParseModule*(VAR p: T): Ast.Branch;
+PROCEDURE ParseModule*(VAR p: T; stopAtImports: BOOLEAN): Ast.Branch;
+   (* stopAtImports: Only parses up to and including the import list.
+      used for dependency scanning. *)
 VAR rv, final: Ast.Branch;
     name0, name1: Ast.Terminal;
 BEGIN
@@ -1167,20 +1169,24 @@ BEGIN
             ELSE
                NilSlot(rv)
             END;
-            Ast.AddChild(rv, ParseDeclarationSequence(p));
-            IF Accept(p, Lex.KBEGIN) THEN
-               Ast.AddChild(rv, ParseStatementSequence(p))
+            IF stopAtImports THEN
+               final := rv
             ELSE
-               NilSlot(rv)
-            END;
-            MustAccept(p, Lex.KEND);
-            name1 := ParseIdent(p);
-            IF Lex.Eql(p.scan, name0.tok, name1.tok) THEN
-               IF AcceptOrFail(p, Lex.DOT) THEN
-                  final := rv
+               Ast.AddChild(rv, ParseDeclarationSequence(p));
+               IF Accept(p, Lex.KBEGIN) THEN
+                  Ast.AddChild(rv, ParseStatementSequence(p))
+               ELSE
+                  NilSlot(rv)
+               END;
+               MustAccept(p, Lex.KEND);
+               name1 := ParseIdent(p);
+               IF Lex.Eql(p.scan, name0.tok, name1.tok) THEN
+                  IF AcceptOrFail(p, Lex.DOT) THEN
+                     final := rv
+                  END
+               ELSE
+                  Err(p, "END does not match module name.")
                END
-            ELSE
-               Err(p, "END does not match module name.")
             END
          END
       END

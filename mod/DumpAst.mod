@@ -14,7 +14,7 @@ BEGIN
       ASSERT(res = 0);
       Dbg.S("FILE: "); Dbg.S(fname); Dbg.Ln;
       par := Par.NewFromFile(fname);
-      root := Par.ParseModule(par);
+      root := Par.ParseModule(par, FALSE);
       root.ops.toStr(root, par.scan.buf, 0);
       Dbg.Ln;   
    END

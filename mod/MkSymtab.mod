@@ -29,7 +29,7 @@ BEGIN
       Dbg.S(" -> "); Dbg.S(outFile.str);
       Dbg.S("...");
       par := Par.NewFromFile(srcFile.str);
-      ast := Par.ParseModule(par);
+      ast := Par.ParseModule(par, FALSE);
       (* ast.ops.toStr(ast, par.scan.buf, 0); *)
       mod := Symtab.BuildModule(ast, par.scan);
       Semcheck.Init(scstate, mod, par.scan);

@@ -8,7 +8,7 @@ VAR p: P.T;
 BEGIN
    (*test*)
    p := P.NewFromFile(fn);
-   ast := P.ParseModule(p);
+   ast := P.ParseModule(p, FALSE);
    Render.Init(outf, p.scan);
    Render.WriteTree(ast);
    Render.Deinit()

@@ -7,7 +7,8 @@ TYPE
    T = RECORD
       srcPaths: ARRAY 16 OF Path.T;
       modPaths: ARRAY 8 OF Path.T;
-      sysPath, modOutPath: Path.T
+      sysPath, modOutPath: Path.T;
+      numSrcPaths, numModPaths: INTEGER
    END;
 VAR cfg: T;
 
@@ -73,17 +74,23 @@ BEGIN
    RETURN rv
 END Exists;
 
-PROCEDURE FindModPath*(modName: ARRAY OF CHAR; VAR path: Path.T): BOOLEAN;
+PROCEDURE PathSearch(modName: ARRAY OF CHAR; 
+                     ext: ARRAY OF CHAR;
+                     locations: ARRAY OF Path.T; 
+                     numLocs: INTEGER;
+                     VAR path: Path.T): BOOLEAN;
+   (* Searchs for modName"."ext in the given locations. 
+      Returns the "path" and TRUE for the first one found. *)
 VAR rv: BOOLEAN;
     i: INTEGER;
 BEGIN
    i := 0;
    rv := FALSE;
-   WHILE ~rv & (i < LEN(cfg.modPaths)) DO
-      IF cfg.modPaths[i].len > 0 THEN 
-         Path.Copy(cfg.modPaths[i], path);
+   WHILE ~rv & (i < numLocs) DO
+      IF locations[i].len > 0 THEN 
+         Path.Copy(locations[i], path);
          Path.Append(path, modName);
-         Path.Append(path, ".slo");
+         Path.Append(path, ext);
          IF Exists(path) THEN
             rv := TRUE
          END
@@ -91,7 +98,35 @@ BEGIN
       INC(i)
    END;
    RETURN rv
+END PathSearch;
+
+PROCEDURE FindModPath*(modName: ARRAY OF CHAR; VAR path: Path.T): BOOLEAN;
+   RETURN PathSearch(modName, ".slo", cfg.modPaths, cfg.numModPaths, path)
 END FindModPath;
+
+PROCEDURE FindSrclessModPath*(modName: ARRAY OF CHAR; 
+                              VAR path: Path.T): BOOLEAN;
+   (* Looks for symbol file for one of the external modules
+      where we only have the symbol file *)
+BEGIN
+   Path.Copy(cfg.sysPath, path);
+   Path.Append(path, modName);
+   Path.Append(path, ".slo");
+   RETURN Exists(path)
+END FindSrclessModPath;
+
+PROCEDURE FindSrcPath*(modName: ARRAY OF CHAR; VAR path: Path.T): BOOLEAN;
+   RETURN PathSearch(modName, ".mod", cfg.srcPaths, cfg.numSrcPaths, path)
+END FindSrcPath;         
+
+PROCEDURE AddSrcPath*(p: Path.T);
+   (* Adds a path to the source file search paths *)
+BEGIN
+   ASSERT(cfg.numSrcPaths < LEN(cfg.srcPaths));
+   Path.Copy(p, cfg.srcPaths[cfg.numSrcPaths]);
+   Path.AssertDir(cfg.srcPaths[cfg.numSrcPaths]);
+   INC(cfg.numSrcPaths)
+END AddSrcPath; 
 
 PROCEDURE Init();
 VAR i, res: INTEGER;
@@ -103,6 +138,8 @@ BEGIN
       Path.Zero(cfg.modPaths[i])
    END;
    (* Base sys config dirs from exe location.  exeloc/../lib *)
+   cfg.numSrcPaths := 1;
+   cfg.numModPaths := 2;
    GetExePath(cfg.sysPath);
    Path.Drop(cfg.sysPath); Path.Drop(cfg.sysPath);
    Path.Append(cfg.sysPath, "lib/");
@@ -112,6 +149,9 @@ BEGIN
    Path.AssertDir(cfg.srcPaths[0]);
    Path.Copy(cfg.srcPaths[0], cfg.modOutPath);
    Path.Copy(cfg.modOutPath, cfg.modPaths[0]);
+   (* Possibly temporary hack for external modules we have a 
+      symbol file for, but no source.  So the sourceless library
+      modules for OBNC *)
    Path.Copy(cfg.sysPath, cfg.modPaths[1]);
 END Init;
 
