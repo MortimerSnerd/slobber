@@ -1,15 +1,15 @@
 (* Calculates dependencies for compiling *)
 MODULE Deps;
 IMPORT
-   Ast, BinReader, Config, Dbg, Files, Lex:=Scanner, Parser, 
-   Path, St:=Symtab, Strings;
+   Ast, BinReader, Config, Cvt:=extConvert, Dbg, Files, 
+   Lex:=Scanner, Parser, Path, St:=Symtab, Strings;
 
 CONST
    MaxNameLen=64;
    MaxDeps=512;
 
    (* flags for ModList.flags *)
-   MLNeedsBuild=0;MLProcessed=1;MLNoSource=2;
+   MLNeedsBuild=0;MLProcessed=1;MLNoSource=2;MLRoot=3;
 
 TYPE
    ModList = POINTER TO ModListDesc;
@@ -18,13 +18,11 @@ TYPE
       src: Path.T;
       id: INTEGER;
       flags: SET;
-      dirtyWalk: INTEGER;
-         (* Incremented every time a file is visited
-            when walking from deps that need to compile
-            to the modules that depend on them.  Used
-            to partially order compile commands.  Low 
-            values are leaves, and the most dependent modules
-            have the highest values. *) 
+      depth: INTEGER;
+         (* Ordered by a walk from the root such that
+            if n depends on o directory or indirectly, 
+            n.depth < o.depth. Used to partially order
+            the dependencies *)
       next: ModList
    END;
 
@@ -63,6 +61,16 @@ BEGIN
    RETURN ml
 END ModFor;
 
+PROCEDURE Root(ds: DepState): ModList;
+VAR ml: ModList;
+BEGIN
+   ml := ds.mods;
+   WHILE (ml # NIL) & ~(MLRoot IN ml.flags) DO
+      ml := ml.next
+   END;
+   RETURN ml
+END Root;
+
 PROCEDURE AddDep(VAR ds: DepState; from, to: INTEGER);
 BEGIN
    ds.deps[ds.numDeps].from := from;
@@ -79,9 +87,13 @@ BEGIN
    END;
    IF ml = NIL THEN
       NEW(ml);
-      ml.dirtyWalk := 0;
+      ml.depth := 0;
       ml.name := name;
       ml.flags := {};
+      IF ds.mods = NIL THEN
+         (* assume first file is the root file *)
+         ml.flags := {MLRoot}
+      END;
       ml.id := ds.numMods; INC(ds.numMods);
       ml.next := ds.mods;
       ds.mods := ml
@@ -181,19 +193,38 @@ BEGIN
    RETURN rv
 END AddDeps;
 
-PROCEDURE MarkDependees(ds: DepState; ml: ModList);
-   (* Inc dirtyWalk for all mods that depend on "ml", 
-      directly or indirectly. Simple, but not efficent. *)
-VAR i:INTEGER;
+PROCEDURE Max(a, b: INTEGER): INTEGER;
+VAR rv: INTEGER;
 BEGIN
-   INC(ml.dirtyWalk);
-   INCL(ml.flags, MLNeedsBuild);
-   FOR i := 0 TO ds.numDeps-1 DO
-      IF ds.deps[i].to = ml.id THEN
-         MarkDependees(ds, ModFor(ds, ds.deps[i].from))
-      END
+   IF a > b THEN
+      rv := a
+   ELSE
+      rv := b
    END
-END MarkDependees;
+   RETURN rv
+END Max;
+
+PROCEDURE CheckNeedsBuild(ds: DepState; ml: ModList): BOOLEAN;
+   (* Propagates any NeedsBuild flags down through
+      the tree towards the root.  Also set's the depth 
+      field used for ordering while doing the walk. *)
+VAR i:INTEGER;
+    chld: ModList;
+    anyDirty: BOOLEAN;
+BEGIN
+   anyDirty := MLNeedsBuild IN ml.flags;
+   FOR i := 0 TO ds.numDeps-1 DO
+      IF ds.deps[i].from = ml.id THEN
+         chld := ModFor(ds, ds.deps[i].to);
+         chld.depth := Max(chld.depth, ml.depth+1);
+         anyDirty := CheckNeedsBuild(ds, chld) OR anyDirty
+      END
+   END;
+   IF anyDirty THEN
+      INCL(ml.flags, MLNeedsBuild)
+   END;
+   RETURN anyDirty
+END CheckNeedsBuild;
 
 PROCEDURE GetModTime(p: Path.T; VAR time, date: INTEGER);
 VAR fh: Files.File;
@@ -221,11 +252,10 @@ BEGIN
    RETURN rv
 END SrcNewerThanSyms;
 
-PROCEDURE Check*(VAR ds: DepState); 
-   (* Checks modules to see if they need to be recompiled, 
-      walking from dependencies to the modules they depend
-      on to set up dirtyWalk to partially order the dependencies
-      in the order required for compiling. *)
+PROCEDURE Check*(VAR ds: DepState): BOOLEAN; 
+   (* Marks modules that need to be rebuilt, by 
+      checking for changes, and propagating the
+      NeedsBuild flag down back towards the root *)
 VAR ml: ModList;
 BEGIN
    ml := ds.mods;
@@ -235,11 +265,9 @@ BEGIN
             INCL(ml.flags, MLNeedsBuild)
          END;
       END;
-      IF MLNeedsBuild IN ml.flags THEN
-         MarkDependees(ds, ml)
-      END;
       ml := ml.next
-   END
+   END;
+   RETURN CheckNeedsBuild(ds, Root(ds))
 END Check;
 
 PROCEDURE NextDirtyFile*(ds: DepState; VAR dest: Path.T): BOOLEAN;
@@ -247,14 +275,14 @@ PROCEDURE NextDirtyFile*(ds: DepState; VAR dest: Path.T): BOOLEAN;
       be compiled, or FALSE if there are none left *)
 VAR rv: BOOLEAN;
     ml, cand: ModList;
-    leastWalk: INTEGER;
+    largestDepth: INTEGER;
 BEGIN
-   leastWalk := 2000000;
+   largestDepth := -1;
    ml := ds.mods;
    cand := NIL;
    WHILE ml # NIL DO
-      IF (MLNeedsBuild IN ml.flags) &  (ml.dirtyWalk < leastWalk) THEN
-         leastWalk := ml.dirtyWalk;
+      IF (MLNeedsBuild IN ml.flags) &  (ml.depth > largestDepth) THEN
+         largestDepth := ml.depth;
          cand := ml
       END;
       ml := ml.next
@@ -294,6 +322,8 @@ VAR fh: Files.File;
     rd: Files.Rider;
     i: INTEGER;
     ml: ModList;
+    pbuf: ARRAY 40 OF CHAR;
+    ignore: BOOLEAN;
 BEGIN
    fh := Files.New(fname);
    IF fh # NIL THEN
@@ -301,9 +331,15 @@ BEGIN
       OS(fh, rd, "digraph {"); OLn(rd);
       FOR i := 0 TO ds.numDeps-1 DO
          ml := ModFor(ds, ds.deps[i].from);
-         OS(fh, rd, ml.name); OS(fh, rd, " -> ");
+         OS(fh, rd, ml.name); 
+         Cvt.IntToString(ml.depth, pbuf, ignore);
+         OS(fh, rd, pbuf);
+         OS(fh, rd, " -> ");
          ml := ModFor(ds, ds.deps[i].to);
-         OS(fh, rd, ml.name); OS(fh, rd, ";");
+         OS(fh, rd, ml.name); 
+         Cvt.IntToString(ml.depth, pbuf, ignore);
+         OS(fh, rd, pbuf);
+         OS(fh, rd, ";");
          OLn(rd)
       END; 
       OS(fh, rd, "}");

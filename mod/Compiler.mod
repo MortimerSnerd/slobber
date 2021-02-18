@@ -76,12 +76,13 @@ BEGIN
    IF ast # NIL THEN
       Deps.InitDepState(deps);
       IF Deps.AddDeps(deps, par.scan, ast, rootSrcFile) THEN
-         Deps.Check(deps);
-         Deps.WriteGraphViz(deps, "/tmp/balls.gv");
-         WHILE rv & Deps.NextDirtyFile(deps, depPath) DO
-            Dbg.S("   Compiling "); Dbg.S(depPath.str); Dbg.Ln;
-            rv := CompileFile(depPath, Ast.StringEq(rootSrcFile, depPath.str), 
-                              opts);
+         IF Deps.Check(deps) THEN
+            Deps.WriteGraphViz(deps, "/tmp/balls.gv");
+            WHILE rv & Deps.NextDirtyFile(deps, depPath) DO
+               Dbg.S("   Compiling "); Dbg.S(depPath.str); Dbg.Ln;
+               rv := CompileFile(depPath, Ast.StringEq(rootSrcFile, depPath.str), 
+                                 opts);
+            END
          END
       ELSE
          rv := FALSE
