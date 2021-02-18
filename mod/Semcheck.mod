@@ -190,19 +190,26 @@ VAR rv, lhs, rhs: Ty.Type;
     br, calldesig: Ast.Branch;
     procTy: Ty.ProcType;
     param: Ast.T;
+    note: Ty.TypeNote;
 BEGIN
    rv := Ty.VoidType;
-   IF t IS Ast.Terminal THEN
+   note := Ty.Remember(t);
+   IF note # NIL THEN
+      rv := note.ty
+   ELSIF t IS Ast.Terminal THEN
       term := t(Ast.Terminal);
-      rv := Ty.TypeForTerminal(term.tok)
+      rv := Ty.TypeForTerminal(term.tok);
+      Ty.Note(t, rv)
    ELSE
       br := t(Ast.Branch);
       IF br.kind = Ast.BkUnOp THEN
-         rv := ExpressionType(mod, scope, Ast.GetChild(br, 1), scan, err)
+         rv := ExpressionType(mod, scope, Ast.GetChild(br, 1), scan, err);
+         Ty.Note(t, rv)
       ELSIF br.kind = Ast.BkSet THEN
          rv := Ty.PrimitiveType(Ty.KSet)
       ELSIF br.kind = Ast.BkParenExpr THEN
-         rv := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err)
+         rv := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err);
+         Ty.Note(t, rv)
       ELSIF br.kind = Ast.BkBinOp THEN
          term := Ast.TermAt(br, 1);
          IF term.tok.kind = Lex.COLEQ THEN
@@ -231,6 +238,9 @@ BEGIN
                   END
                END
             END
+         END;
+         IF rv.kind # Ty.KTypeError THEN
+            Ty.Note(t, rv)
          END
       ELSIF br.kind = Ast.BkCall THEN
          (* We only check the expression type here, not whether
@@ -273,7 +283,8 @@ BEGIN
                ELSE
                   rv := procTy.returnTy;
                END
-            END
+            END;
+            Ty.Note(t, rv)
          ELSE
             err := Ast.MkSrcError("LHS of '(' is not a function type.", 
                                   scan, br);
