@@ -372,6 +372,13 @@ BEGIN
    puop(gs, dest, FETCH, addr)
 END opFETCH;
 
+PROCEDURE opSTORE(VAR gs: GenerateState; lhs: VarNameOpt;
+                  rhs: ValueOpt);
+   (* Store "rhs" into the address in "lhs" *)
+BEGIN
+   pbop(gs, DontCare, STORE, lhs, rhs);
+END opSTORE;
+
 PROCEDURE GenDesigAddr(VAR gs: GenerateState; desig: Ast.Branch; 
                       VAR dest: VarName);
    (* Does address calculation code for a designator.  Not 
@@ -479,9 +486,9 @@ BEGIN
       err := St.EvalTerminal(gs.mod, gs.scan, t(Ast.Terminal),
                              cv.val);
       ASSERT(err = NIL);
-      puop(gs, dest, LIT, cv);
       dest.ty := Ty.PrimitiveType(cv.val.kind);
       cv.ty := dest.ty;
+      puop(gs, dest, LIT, cv);
    ELSE
       br := t(Ast.Branch);
       IF br.kind = Ast.BkBinOp THEN
@@ -550,7 +557,7 @@ END GenRepeatStmt;
 
 PROCEDURE GenForStmt(VAR gs: GenerateState; br: Ast.Branch);
 VAR cond, exit: LabelOpt;
-    count, to, condName: VarNameOpt;
+    countAddr, to, condName, tmp0, tmp1: VarNameOpt;
     by: ConstValueOpt;
     note: Semcheck.CVNote;
     bynode: Ast.T;
@@ -565,16 +572,25 @@ BEGIN
       NEW(by); 
       by.val := note.val;
    END;
-   count := VarRefTerm(gs, Ast.TermAt(br, Ast.ForStmtVarName)); 
-   GenExpr(gs, Ast.GetChild(br, Ast.ForStmtBegin), count^);
+   countAddr := MkTmp(gs, NIL);
+   opVARADDR(gs, countAddr^, 
+             VarRefTerm(gs, Ast.TermAt(br, Ast.ForStmtVarName))); 
+   tmp0 := MkTmp(gs, NIL);
+   GenExpr(gs, Ast.GetChild(br, Ast.ForStmtBegin), tmp0^);
+   opSTORE(gs, countAddr, tmp0);
    cond := MkLabel(gs); opLABEL(gs, cond);
    to := MkTmp(gs, NIL);
    GenExpr(gs, Ast.GetChild(br, Ast.ForStmtEnd), to^);
    condName := MkTmp(gs, NIL);
-   opBINOP(gs, condName^, Lex.LTE, count, to);
+   tmp0 := MkTmp(gs, NIL);
+   opFETCH(gs, tmp0^, countAddr);
+   opBINOP(gs, condName^, Lex.LTE, tmp0, to);
    opBRANCHF(gs, condName, exit);
    GenStmtSeqFwd(gs, Ast.BranchAt(br, Ast.ForStmtBody));
-   opBINOP(gs, count^, Lex.PLUS, count, by);
+   tmp0 := MkTmp(gs, NIL); tmp1 := MkTmp(gs, NIL);
+   opFETCH(gs, tmp0^, countAddr);
+   opBINOP(gs, tmp1^, Lex.PLUS, tmp0, by);
+   opSTORE(gs, countAddr, tmp0);
    opBRANCH(gs, cond);
    opLABEL(gs, exit);
 END GenForStmt; 
@@ -591,7 +607,7 @@ BEGIN
          rhs := MkTmp(gs, note.ty);
          GenExpr(gs, Ast.GetChild(br, 2), rhs^); 
          var := MkTmp(gs, note.ty);  GenDesigAddr(gs, Ast.BranchAt(br, 0), var^);
-         pbop(gs, DontCare, STORE, var, rhs);
+         opSTORE(gs, var, rhs);
       ELSE
          Dbg.S("Unexpected binop? "); Dbg.I(op.tok.kind); Dbg.Ln;
          ASSERT(FALSE)
