@@ -51,7 +51,7 @@ TYPE
    VarNameOpt = POINTER TO VarName;
 
    Op = RECORD
-      var: VarName;
+      var: VarNameOpt;
       op: INTEGER;
       lhs, rhs: ValueOpt
          (* var, constant value *)
@@ -66,6 +66,16 @@ TYPE
       ops: ARRAY 32 OF Op;
       count: INTEGER;
       prev, next: OpChunk
+   END;
+
+   ScopeVarAddr = POINTER TO ScopeVarAddrDesc;
+   ScopeVarAddrDesc = RECORD
+      id: INTEGER;
+         (* Id of variable that we've done a VARADDR
+            on previously.  Must be for a var from the
+            source, not a temp var *)
+      tempVar: VarNameOpt
+         (* Temp var that holds the address in the current scope *)
    END;
 
    (* Placeholder now, contains all of the generated code for
@@ -89,7 +99,7 @@ VAR
    GenStmtSeqFwd: PROCEDURE(VAR gs: GenerateState; stmts: Ast.Branch);
    OpNames: ARRAY NumOps, MaxNameLen OF CHAR;
    OpFlags: ARRAY NumOps OF SET;
-   DontCare: VarName;  
+   DontCare: VarNameOpt;  
       (* Sentinel dest for operations that don't have a result *)
 
 PROCEDURE MkOpSeq(): OpSeq;
@@ -186,7 +196,7 @@ BEGIN
    RETURN rv
 END MkLabel;
 
-PROCEDURE bop(VAR op: Op; nm: VarName; opcode: INTEGER; lhs, rhs: ValueOpt);
+PROCEDURE bop(VAR op: Op; nm: VarNameOpt; opcode: INTEGER; lhs, rhs: ValueOpt);
    (* Init binary op *)
 BEGIN
    op.var := nm;
@@ -195,7 +205,7 @@ BEGIN
    op.rhs := rhs;
 END bop;
 
-PROCEDURE pbop(VAR gs: GenerateState; nm: VarName; opcode: INTEGER; lhs, rhs: ValueOpt);
+PROCEDURE pbop(VAR gs: GenerateState; nm: VarNameOpt; opcode: INTEGER; lhs, rhs: ValueOpt);
    (* Init binary op and push it to the back of the code array *)
 VAR op: Op;
 BEGIN
@@ -203,7 +213,7 @@ BEGIN
    Push(gs.code.ops, op)
 END pbop;
 
-PROCEDURE uop(VAR op: Op; nm: VarName; opcode: INTEGER; param: ValueOpt);
+PROCEDURE uop(VAR op: Op; nm: VarNameOpt; opcode: INTEGER; param: ValueOpt);
    (* Init unary op *)
 BEGIN
    op.var := nm;
@@ -211,7 +221,7 @@ BEGIN
    op.lhs := param;
 END uop;
 
-PROCEDURE puop(VAR gs: GenerateState; nm: VarName; opcode: INTEGER; param: ValueOpt);
+PROCEDURE puop(VAR gs: GenerateState; nm: VarNameOpt; opcode: INTEGER; param: ValueOpt);
    (* Push a uop to the end of the opcodes *)
 VAR op: Op;
 BEGIN
@@ -298,7 +308,7 @@ BEGIN
    RETURN rv
 END NewIntConst;
 
-PROCEDURE PatchLastDest(VAR gs: GenerateState; vn: VarName);
+PROCEDURE PatchLastDest(VAR gs: GenerateState; vn: VarNameOpt);
 VAR ch: OpChunk;
     done: BOOLEAN;
 BEGIN
@@ -333,7 +343,7 @@ BEGIN
    RETURN rv
 END DesigConstVal;
 
-PROCEDURE opVARADDR(VAR gs: GenerateState; VAR dest: VarName; 
+PROCEDURE opVARADDR(VAR gs: GenerateState; dest: VarNameOpt; 
                     vname: VarNameOpt);
    (* Pushes a VARADDR onto the end of the CodeSeq, updating the
       type of "dest" to be correct *)
@@ -351,7 +361,7 @@ BEGIN
       change. Would it be safe to change "dest" to the matched var? *)
 END opVARADDR;
 
-PROCEDURE opADDPTR(VAR gs: GenerateState; VAR dest: VarName;
+PROCEDURE opADDPTR(VAR gs: GenerateState; dest: VarNameOpt;
                    ptr: VarNameOpt; offset: ValueOpt);
    (* Pushes ADDPTR.  The type of "dest" must be specified by the 
       caller, because we otherwise don't have enough
@@ -364,7 +374,7 @@ BEGIN
    pbop(gs, dest, ADDPTR, ptr, offset);
 END opADDPTR;
 
-PROCEDURE opFETCH(VAR gs: GenerateState; VAR dest: VarName;
+PROCEDURE opFETCH(VAR gs: GenerateState; dest: VarNameOpt;
                   addr: ValueOpt);
 BEGIN
    FAILIF(addr.ty.kind # Ty.KPointer, "Fetch on non-pointer");
@@ -380,7 +390,7 @@ BEGIN
 END opSTORE;
 
 PROCEDURE GenDesigAddr(VAR gs: GenerateState; desig: Ast.Branch; 
-                      VAR dest: VarName);
+                      dest: VarNameOpt);
    (* Does address calculation code for a designator.  Not 
       meant to be called for designators for constants, as those
       won't produce an address.  This will update the type
@@ -407,7 +417,7 @@ BEGIN
    Ty.GetQualName(qident, gs.scan, qn);
    ts := St.FindConst(gs.mod, gs.curProc.frame, qn);
    ASSERT(ts = NIL);
-   opVARADDR(gs, tp^, VarRef(qident));
+   opVARADDR(gs, tp, VarRef(qident));
    FOR i := 1 TO desig.childLen-1 DO
       sel := Ast.BranchAt(desig, i);
       CASE sel.n OF
@@ -421,7 +431,7 @@ BEGIN
          pty := Ty.MkPointerType();
          pty.ty := fld.ty;
          tn := MkTmp(gs, pty);
-         opADDPTR(gs, tn^, tp, NewIntConst(fld.offset));
+         opADDPTR(gs, tn, tp, NewIntConst(fld.offset));
          prevTy := pty;
          tp := tn
       END
@@ -447,7 +457,7 @@ BEGIN
    RETURN rv
 END BinOpFor;
 
-PROCEDURE opBINOP(VAR gs: GenerateState; VAR dest: VarName; 
+PROCEDURE opBINOP(VAR gs: GenerateState; dest: VarNameOpt; 
                   tk: INTEGER; lhs, rhs: ValueOpt);
    (* Appends the appropriate binary op for the given 
       token type, updating the type of `dest` to be
@@ -470,7 +480,7 @@ END opBINOP;
    these types in semcheck, or call some sort of function here
    that encodes these differences? *)
 
-PROCEDURE GenExpr(VAR gs: GenerateState; t: Ast.T; VAR dest: VarName);
+PROCEDURE GenExpr(VAR gs: GenerateState; t: Ast.T; dest: VarNameOpt);
    (* Generates opcodes for the expression, and stores
       the result to "dest" *)
 VAR cv: ConstValueOpt;
@@ -496,16 +506,16 @@ BEGIN
          op := Ast.TermAt(br, 1);
          note := Ty.Remember(br);
          lhs := MkTmp(gs, note.ty);
-         GenExpr(gs, Ast.GetChild(br, 0), lhs^);
+         GenExpr(gs, Ast.GetChild(br, 0), lhs);
          rhs := MkTmp(gs, note.ty);
-         GenExpr(gs, Ast.GetChild(br, 2), rhs^);
+         GenExpr(gs, Ast.GetChild(br, 2), rhs);
          opBINOP(gs, dest, op.tok.kind, lhs, rhs);
       ELSIF br.kind = Ast.BkDesignator THEN
          ov := DesigConstVal(gs, br);
          IF ov = NIL THEN
             note := Ty.Remember(Ast.GetChild(br, br.childLen-1));
             lhs := MkTmp(gs, note.ty); (* TODO: actually, is ptr to note.ty *)
-            GenDesigAddr(gs, br, lhs^);
+            GenDesigAddr(gs, br, lhs);
             opFETCH(gs, dest, lhs);
          END
       ELSE
@@ -528,7 +538,7 @@ BEGIN
       cond := Ast.GetChild(br, i);
       IF cond # NIL THEN   
          cvar := MkTmp(gs, NIL);
-         GenExpr(gs, Ast.GetChild(br, i), cvar^);
+         GenExpr(gs, Ast.GetChild(br, i), cvar);
          opBRANCHF(gs, cvar, nextTest);
          GenStmtSeqFwd(gs, Ast.BranchAt(br, i+1));
          opBRANCH(gs, end);
@@ -551,7 +561,7 @@ BEGIN
    opLABEL(gs, begin);
    GenStmtSeqFwd(gs, Ast.BranchAt(br, Ast.RepeatStmtBody));
    cvar := MkTmp(gs, NIL);
-   GenExpr(gs, Ast.GetChild(br, Ast.RepeatStmtCond), cvar^);
+   GenExpr(gs, Ast.GetChild(br, Ast.RepeatStmtCond), cvar);
    opBRANCHF(gs, cvar, begin);
 END GenRepeatStmt;
 
@@ -573,23 +583,23 @@ BEGIN
       by.val := note.val;
    END;
    countAddr := MkTmp(gs, NIL);
-   opVARADDR(gs, countAddr^, 
+   opVARADDR(gs, countAddr, 
              VarRefTerm(gs, Ast.TermAt(br, Ast.ForStmtVarName))); 
    tmp0 := MkTmp(gs, NIL);
-   GenExpr(gs, Ast.GetChild(br, Ast.ForStmtBegin), tmp0^);
+   GenExpr(gs, Ast.GetChild(br, Ast.ForStmtBegin), tmp0);
    opSTORE(gs, countAddr, tmp0);
    cond := MkLabel(gs); opLABEL(gs, cond);
    to := MkTmp(gs, NIL);
-   GenExpr(gs, Ast.GetChild(br, Ast.ForStmtEnd), to^);
+   GenExpr(gs, Ast.GetChild(br, Ast.ForStmtEnd), to);
    condName := MkTmp(gs, NIL);
    tmp0 := MkTmp(gs, NIL);
-   opFETCH(gs, tmp0^, countAddr);
-   opBINOP(gs, condName^, Lex.LTE, tmp0, to);
+   opFETCH(gs, tmp0, countAddr);
+   opBINOP(gs, condName, Lex.LTE, tmp0, to);
    opBRANCHF(gs, condName, exit);
    GenStmtSeqFwd(gs, Ast.BranchAt(br, Ast.ForStmtBody));
    tmp0 := MkTmp(gs, NIL); tmp1 := MkTmp(gs, NIL);
-   opFETCH(gs, tmp0^, countAddr);
-   opBINOP(gs, tmp1^, Lex.PLUS, tmp0, by);
+   opFETCH(gs, tmp0, countAddr);
+   opBINOP(gs, tmp1, Lex.PLUS, tmp0, by);
    opSTORE(gs, countAddr, tmp0);
    opBRANCH(gs, cond);
    opLABEL(gs, exit);
@@ -605,8 +615,8 @@ BEGIN
       IF op.tok.kind = Lex.COLEQ THEN
          note := Ty.Remember(Ast.GetChild(br, 2));
          rhs := MkTmp(gs, note.ty);
-         GenExpr(gs, Ast.GetChild(br, 2), rhs^); 
-         var := MkTmp(gs, note.ty);  GenDesigAddr(gs, Ast.BranchAt(br, 0), var^);
+         GenExpr(gs, Ast.GetChild(br, 2), rhs); 
+         var := MkTmp(gs, note.ty);  GenDesigAddr(gs, Ast.BranchAt(br, 0), var);
          opSTORE(gs, var, rhs);
       ELSE
          Dbg.S("Unexpected binop? "); Dbg.I(op.tok.kind); Dbg.Ln;
@@ -657,7 +667,7 @@ BEGIN
    UNTIL proc = NIL;
 END Generate;
 
-PROCEDURE LogVar(vn: VarName);
+PROCEDURE LogVar(vn: VarNameOpt);
 BEGIN
    IF vn.id < 0 THEN
       Dbg.S("t"); Dbg.I(-vn.id);
@@ -701,7 +711,7 @@ BEGIN
          Dbg.S(buf)
       END
    ELSIF vo IS VarNameOpt THEN
-      LogVar(vo(VarNameOpt)^)
+      LogVar(vo(VarNameOpt))
    ELSIF vo IS LabelOpt THEN
       Dbg.S("L");Dbg.I(vo(LabelOpt).id);
    ELSIF vo IS ScopeOpt THEN
@@ -788,6 +798,7 @@ BEGIN
    opn(SCOPE, "SCOPE", {ofUn});
    opn(TESTLTE, "TESTLTE", {ofBin});
 
+   NEW(DontCare);
    DontCare.id := -1;
    DontCare.ts := NIL;
    DontCare.ty := NIL;
