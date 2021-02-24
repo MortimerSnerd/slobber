@@ -1,7 +1,8 @@
 (* Command line driver *)
 MODULE Compile;
 IMPORT
-   Args:=extArgs, Config, Compiler, Dbg, Path, Strings;
+   AMD64, Args:=extArgs, Config, Compiler, Dbg, Path,
+   Target;
 
 PROCEDURE Usage;
 BEGIN
@@ -58,6 +59,10 @@ BEGIN
       Dbg.S("ERROR: No source file specified."); Dbg.Ln;
       good := FALSE;
    END; 
+   (* hardcoding *)
+   opts.targ := Target.MkBlankTarget();
+   AMD64.Init(opts.targ);
+
    IF good THEN
       IF Compiler.Compile(path.str, opts) THEN
          Dbg.S("Good")

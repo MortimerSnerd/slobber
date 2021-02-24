@@ -2,7 +2,7 @@
 MODULE Compiler;
 IMPORT
    Ast, BinWriter, Config, Dbg, Deps, Il, Parser, Path, 
-   Lex:=Scanner, Semcheck, St:=Symtab;
+   Semcheck, St:=Symtab, Target;
 
 CONST
    (* Option flags *)
@@ -10,7 +10,8 @@ CONST
 
 TYPE
    Options* = RECORD 
-      flags*: SET
+      flags*: SET;
+      targ*: Target.T
    END;
 
 PROCEDURE InitOptions*(VAR op: Options);
@@ -28,6 +29,7 @@ VAR ast: Ast.Branch;
     wr: BinWriter.T;
     outFile: Path.T;
     i: INTEGER;
+    gs: Il.GenerateState;
 BEGIN
    rv := TRUE;
    par := Parser.NewFromFile(path.str);
@@ -50,6 +52,12 @@ BEGIN
                Dbg.S(outFile.str); Dbg.Ln;
                rv := FALSE
             END
+         END;
+         IF rv & ~(OnlyGenSyms IN opts.flags) THEN
+            Il.InitGenerateState(gs, mod, par.scan, opts.targ);
+            Il.Generate(gs);
+            Il.LogCode(gs);
+            (*TODOOD*)
          END
       ELSE
          FOR i := 0 TO mod.nofErrs-1 DO

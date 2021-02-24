@@ -71,13 +71,20 @@ TYPE
       name*: ARRAY MaxNameLen OF CHAR;
       ty*: Type;
       export*: BOOLEAN;
-      next*: RecordField
+      next*: RecordField;
+      offset*: INTEGER
+         (* Byte offset into struct.  Not filled out here, 
+            location depends on target arch *)
    END;
 
    RecordType* = POINTER TO RecordTypeDesc;
    RecordTypeDesc* = RECORD(TypeDesc)
       base*: Type;
-      fields*: RecordField
+      fields*: RecordField;
+      byteSize*: INTEGER
+         (* Not filled out here, but by the arch specific
+            target.  We don't know without knowing 
+            alignment restrictions *)
    END;
 
    ProcParam* = POINTER TO ProcParamDesc;
@@ -124,6 +131,10 @@ TYPE
       types: SSType
          (* Named type references *)
    END;
+
+   (* Signature for function that calculates the
+      required alignment for a type *)
+   AlignFn* = PROCEDURE(t: Type): INTEGER;
 
 VAR
    PrimNames:  ARRAY PrimLookupLen OF ARRAY 16 OF CHAR;
@@ -208,6 +219,7 @@ BEGIN
    rv.ty := NIL;
    rv.next := NIL;
    rv.export := FALSE;
+   rv.offset := 0;
    RETURN rv
 END MkRecordField; 
    
@@ -219,7 +231,8 @@ BEGIN
    rv.flags := {};
    rv.srcName := NIL;
    rv.base := NIL;
-   rv.fields := NIL
+   rv.fields := NIL;
+   rv.byteSize := 0;
    RETURN rv
 END MkRecordType;
 
@@ -420,7 +433,76 @@ BEGIN
    RETURN rv
 END FindField; 
 
-
+(* Writes a short one line version of the type to the debug output, 
+   preferring the name for the type if there is one *)
+PROCEDURE DbgSummary*(t: Type);
+VAR art: ArrayType;
+    rty: RecordType;
+    fld: RecordField;
+    pfld: ProcParam;
+    proc: ProcType;
+BEGIN
+   IF t.srcName # NIL THEN
+      Dbg.S(t.srcName.module); Dbg.S(".");
+      Dbg.S(t.srcName.name)
+   ELSE
+      CASE t.kind OF
+      KByte: Dbg.S("BYTE")
+      |KInteger: Dbg.S("INTEGER")
+      |KBoolean: Dbg.S("BOOLEAN")
+      |KReal: Dbg.S("REAL");
+      |KChar: Dbg.S("CHAR"); 
+      |KSet: Dbg.S("SET")
+      |KPrimName: Dbg.S("PRIMTYNAME")
+      |KVoid: Dbg.S("VOID")
+      |KArray:
+         art := t(ArrayType);
+         Dbg.S("ARRAY ");
+         IF ~(OpenArray IN t.flags) THEN
+             Dbg.I(art.dim); Dbg.S(" ");
+         END;
+         Dbg.S("OF ");
+         DbgSummary(art.ty)
+      |KPointer:
+         Dbg.S("POINTER TO ");
+         DbgSummary(t(PointerType).ty)
+      |KRecord:
+         rty := t(RecordType);
+         fld := rty.fields;
+         Dbg.S("RECORD");
+         IF rty.base # NIL THEN
+            Dbg.S("("); DbgSummary(rty.base); Dbg.S(")")
+         END;
+         Dbg.S(" [");
+         WHILE fld # NIL DO
+            Dbg.S(" ");
+            Dbg.S(fld.name);
+            IF fld.next # NIL THEN Dbg.S(",") END;
+            fld := fld.next
+         END;
+         Dbg.S("]")
+      |KTypeError: Dbg.S("ERROR")
+      |KDeferredPtrTarget: Dbg.S("DEFERRED PTR")
+      |KProcedure: 
+         Dbg.S("PROCEDURE");
+         proc := t(ProcType);
+         pfld := proc.params;
+         IF pfld # NIL THEN
+            Dbg.S("(");
+            WHILE pfld # NIL DO
+               DbgSummary(pfld.ty);
+               IF pfld.next # NIL THEN Dbg.S(",") END;
+               pfld := pfld.next
+            END;
+         END;
+         IF proc.returnTy # NIL THEN
+            Dbg.S(": ");
+            DbgSummary(proc.returnTy)
+         END
+      END
+   END
+END DbgSummary;
+         
 (* Writes a pretty version of a type to the debug output *)
 PROCEDURE DbgPrint*(t: Type; indent: INTEGER);
 VAR art: ArrayType;
@@ -930,6 +1012,7 @@ BEGIN
    END
    RETURN rv
 END AcceptPrimTyName;
+
 
 (* Given a type constant for a primitive type, 
    returns an instance for it.  Returns NIL if

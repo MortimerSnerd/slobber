@@ -109,6 +109,12 @@ TYPE
             semantic checking *)
    END; 
 
+   (* Annotates AST nodes with the corresponding TypeSym *)
+   TSAnnotation* = POINTER TO TSAnnotationDesc;
+   TSAnnotationDesc* = RECORD(Ast.AnnotationDesc)
+      ts*: TypeSym
+   END;
+
 VAR
    (* fwd decl *)
    CvtStrucType: PROCEDURE(mod: Module; frame: Frame; t: Ast.T; scan: Lex.T; 
@@ -119,6 +125,30 @@ VAR
    (* Symtab for builtin functions that are globally available. Should
       only have procedures *)
    Builtins: Module;
+
+PROCEDURE Note*(t: Ast.T; ts: TypeSym);
+VAR n: TSAnnotation;
+BEGIN
+   NEW(n);
+   n.ts := ts;
+   Ast.Note(t, n)
+END Note;
+
+PROCEDURE Remember*(t: Ast.T): TSAnnotation;
+VAR an: Ast.Annotation;
+    rv: TSAnnotation;
+BEGIN
+   an := t.notes;
+   WHILE (an # NIL) & ~(an IS TSAnnotation) DO
+      an := an.anext
+   END;
+   IF an # NIL THEN
+      rv := an(TSAnnotation)
+   ELSE
+      rv := NIL
+   END;
+   RETURN rv
+END Remember;
 
 PROCEDURE MkFrame(owner: Module; chainTo: Frame): Frame;
 VAR rv: Frame;

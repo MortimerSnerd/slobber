@@ -1,17 +1,51 @@
 (* Semantic checking and desugaring passes for the AST *)
 MODULE Semcheck;
 IMPORT
-   Ast, Dbg, Symtab, Lex := Scanner, Ty:=Types;
+   Ast, Symtab, Lex := Scanner, Ty:=Types;
 
 TYPE
    State* = RECORD
       mod: Symtab.Module;
       scan: Lex.T
    END;
+   
+   (* Note we put on constant expressions after we have 
+      evaluated them to make sure they are constant expressions. 
+      Used by code generation later on. Not needed for constant 
+      declaration, their value is already in their TypeSym. *)
+   CVNote* = POINTER TO CVNoteDesc;
+   CVNoteDesc* = RECORD(Ast.AnnotationDesc)
+      val*: Symtab.ConstVal
+   END;
 
 VAR
    (* Fwd decls *)
    Pass1StmtSeq: PROCEDURE(st: State; proc: Symtab.TypeSym; seq: Ast.Branch);
+
+PROCEDURE NoteValue*(t: Ast.T; v: Symtab.ConstVal);
+   (* Records a value for a constant expression *)
+VAR note: CVNote;
+BEGIN
+   NEW(note);
+   note.val := v;
+   Ast.Note(t, note)
+END NoteValue;
+
+PROCEDURE RememberValue*(t: Ast.T): CVNote;
+VAR note: Ast.Annotation;
+    rv: CVNote;
+BEGIN
+   note := t.notes;
+   WHILE (note # NIL) & ~(note IS CVNote) DO
+      note := note.anext
+   END;
+   IF note = NIL THEN
+      rv := NIL
+   ELSE
+      rv := note(CVNote)
+   END;
+   RETURN rv
+END RememberValue;
 
 PROCEDURE Init*(VAR s: State; mod: Symtab.Module; scan: Lex.T);
 BEGIN
@@ -54,6 +88,7 @@ BEGIN
          rv := Ty.ErrorType
       ELSE
          Ty.Note(desigQIdent, lhsTs.ty);
+         Symtab.Note(desigQIdent, lhsTs);
          lhs := lhsTs.ty;
          ix := 1;
          err := NIL;
@@ -757,6 +792,8 @@ VAR vname: Ast.Terminal;
     vsym: Symtab.TypeSym;
     qn: Ty.QualName;
     expr: Ast.T;
+    err: Ast.SrcError;
+    byval: Symtab.ConstVal;
 BEGIN
    vname := Ast.TermAt(stmt, Ast.ForStmtVarName);
    Ty.GetUnqualName(vname, st.scan, qn);
@@ -771,8 +808,17 @@ BEGIN
    ExprShouldBeInteger(st, proc, expr);
    CheckExpression(st, proc, expr);
    expr := Ast.GetChild(stmt, Ast.ForStmtBy);
-   ExprShouldBeInteger(st, proc, expr);
-   CheckExpression(st, proc, expr);
+   IF expr # NIL THEN
+      err := Symtab.EvalConstExpr(st.mod, proc.frame, st.scan, 
+                                  expr, byval);
+      IF err = NIL THEN
+         NoteValue(expr, byval);
+         ExprShouldBeInteger(st, proc, expr);
+         CheckExpression(st, proc, expr);
+      ELSE
+         Symtab.AddErr(st.mod, err)
+      END;
+   END;
    Pass1StmtSeq(st, proc, Ast.BranchAt(stmt, Ast.ForStmtBody))
 END CheckForStmt;
 
@@ -894,8 +940,9 @@ BEGIN
       IF err = NIL THEN
          tyr := ExpressionType(st.mod, proc.frame, rhs, st.scan, err);
          IF err = NIL THEN
+            Ty.Note(rhs, tyr);
             IF ~Ty.Equal(tyl, tyr) THEN
-               CheckAssignmentValid(st, proc, desig, rhs, tyl, tyr)
+               CheckAssignmentValid(st, proc, desig, rhs, tyl, tyr);
             END
          ELSE
             Symtab.AddErr(st.mod, err)
