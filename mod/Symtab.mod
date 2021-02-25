@@ -42,6 +42,8 @@ TYPE
    TypeSymDesc* = RECORD
       kind*: INTEGER;  (* ts* constants *)
       name*: ARRAY MaxNameLen OF CHAR;
+      id*: INTEGER;
+         (* Unique for this typesym in the source file it was defined in *)
       ty*: Ty.Type;
       export*: BOOLEAN;
       val*: OptConstVal;
@@ -189,6 +191,7 @@ BEGIN
    rv.export := FALSE;
    rv.next := NIL;
    rv.frame := NIL;
+   rv.id := 0;
    RETURN rv
 END MkTypeSym; 
 
@@ -665,6 +668,7 @@ BEGIN
          FOR j := 0 TO fpsec.childLen-2 DO
             fld := Ty.MkProcParam();
             name := Ast.TermAt(fpsec, j);
+            fld.seekpos := name.tok.start;
             Lex.Extract(scan, name.tok, fld.name);
             fld.ty := paramTy;
             fld.next := paramList;
@@ -711,6 +715,7 @@ BEGIN
    param := proc.params;
    WHILE param # NIL DO
       ts := MkTypeSym(tsProcParam);
+      ts.id := param.seekpos;
       Strings.Append(param.name, ts.name);
       ts.ty := param.ty;
       ts.next := rv.vars;
@@ -898,6 +903,7 @@ BEGIN
       FOR i := 0 TO identList.childLen-1 DO
          fv := MkTypeSym(tsVar);
          name := Ast.TermAt(identList, i);
+         fv.id := name.tok.start;
          Lex.Extract(scan, name.tok, fv.name);
          fv.export := name.export;
          fv.ty := vtype;
@@ -939,6 +945,7 @@ BEGIN
          ASSERT(br.kind = Ast.BkConstDeclaration);
          id := Ast.TermAt(br, 0);
          Lex.Extract(scan, id.tok, cd.name);
+         cd.id := id.tok.start;
          cd.export := id.export;
          err := EvalConstExpr(rv, frame, scan, Ast.GetChild(br, 1), cd.val^);
          IF err # NIL THEN
@@ -966,6 +973,7 @@ BEGIN
          procDecl := Ast.BranchAt(procDecls, i);
          ent := MkTypeSym(tsProc);
          fname := Ast.TermAt(procDecl, Ast.ProcedureDeclName);
+         ent.id := fname.tok.start;
          Lex.Extract(scan, fname.tok, ent.name);
          ent.export := fname.export;
          (* proc decls get their own frame for their child declarations *) 
@@ -1041,6 +1049,7 @@ BEGIN
          IF err = NIL THEN
             t := Ast.TermAt(br, Ast.TypeDeclName);
             Lex.Extract(scan, t.tok, ty.name);
+            ty.id := t.tok.start;
             ty.export := t.export;
             MkSrcName(ty.ty);
             Strings.Append(mod.name, ty.ty.srcName.module);
@@ -1102,6 +1111,7 @@ BEGIN
          BinWriter.Bool(w, TRUE);
          BinWriter.I8(w, ts.kind);
          BinWriter.String(w, ts.name);
+         BinWriter.I32(w, ts.id);
          Ty.Write(w, ss, ts.ty);
          IF BinWriter.Cond(w, ts.val # NIL) THEN
             WriteConstVal(w, ts.val^)
@@ -1121,6 +1131,7 @@ BEGIN
       ts := MkTypeSym(0);
       BinReader.I8(w, ts.kind);
       BinReader.String(w, ts.name);
+      BinReader.I32(w, ts.id);
       ts.ty := Ty.Read(w, ss);
       IF BinReader.Cond(w) THEN
          NEW(ts.val);
