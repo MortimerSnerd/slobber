@@ -68,17 +68,14 @@ TYPE
       prev, next: OpChunk
    END;
 
-   (* Record of temp vars that are storing var addresses
-      for the current scope *)
    ScopeVarAddr = POINTER TO ScopeVarAddrDesc;
    ScopeVarAddrDesc = RECORD
       id: INTEGER;
          (* Id of variable that we've done a VARADDR
             on previously.  Must be for a var from the
             source, not a temp var *)
-      tempVar: VarNameOpt;
+      tempVar: VarNameOpt
          (* Temp var that holds the address in the current scope *)
-      next: ScopeVarAddr
    END;
 
    (* Placeholder now, contains all of the generated code for
@@ -95,8 +92,7 @@ TYPE
       labelNum: INTEGER;
       code: ModuleCode;
       targ: Target.T;
-      curProc: St.TypeSym;
-      varAddrs: ScopeVarAddr
+      curProc: St.TypeSym
    END;
 
 VAR
@@ -140,13 +136,6 @@ BEGIN
    RETURN rv
 END MkModuleCode;
 
-PROCEDURE ClearProcScope(VAR gs: GenerateState);
-   (* Clears the scope state in preparation for
-      starting a new proc scope *)
-BEGIN
-   gs.varAddrs := NIL;
-END ClearProcScope;
-
 PROCEDURE InitGenerateState*(VAR gs: GenerateState; mod: St.Module; 
                              scan: Lex.T; targ: Target.T);
    (* Sets up the state needed to call the Generate functions *)
@@ -156,7 +145,6 @@ BEGIN
    gs.targ := targ;
    gs.tempNum := -2;  (* -1 reserved for DontCare sentinel *)
    gs.labelNum := 1;
-   gs.varAddrs := NIL;
    gs.code := MkModuleCode()
 END InitGenerateState;
 
@@ -169,38 +157,6 @@ BEGIN
       ASSERT(FALSE)
    END
 END FAILIF;
-
-PROCEDURE TmpForVarAddr(gs: GenerateState; var: VarNameOpt): VarNameOpt;
-   (* If the address for a var has already been stored in a temp
-      for the current scope, it returns it.  Returns NIL otherwise *)
-VAR rv: VarNameOpt;
-    s: ScopeVarAddr;
-BEGIN
-   rv := NIL;
-   s := gs.varAddrs;
-   WHILE (rv = NIL) & (s # NIL) DO
-      IF s.id = var.id THEN
-         rv := s.tempVar
-      ELSE
-         s := s.next
-      END
-   END;
-   RETURN rv
-END TmpForVarAddr;
-
-PROCEDURE TmpPointsToVar(VAR gs: GenerateState; var, tmp: VarNameOpt);
-   (* Records the fact that "tmp" has the address of "var" in the current
-      scope. *)
-VAR sva: ScopeVarAddr;
-BEGIN
-   FAILIF(tmp.id >= 0, "tmp not a temp var");
-   FAILIF(var.id < 0, "var not a source variable");
-   NEW(sva);
-   sva.id := var.id;
-   sva.tempVar := tmp;
-   sva.next := gs.varAddrs;
-   gs.varAddrs := sva
-END TmpPointsToVar;
 
 PROCEDURE Tmp(VAR gs: GenerateState; ty: Ty.Type; VAR t: VarName);
    (* Generates a new temp name *)
@@ -316,7 +272,7 @@ BEGIN
    ts := St.FindVar(gs.mod, gs.curProc.frame, qn);
    FAILIF(ts = NIL, "No var found for terminal");
    NEW(rv);
-   rv.id := ts.id;
+   rv.id := term.tok.start;
    rv.ts := ts;
    rv.ty := ts.ty;
    RETURN rv
@@ -332,7 +288,7 @@ BEGIN
    note := St.Remember(qident);
    IF note # NIL THEN
       term := Ast.TermAt(qident, Ast.QualIdentName);
-      rv.id := note.ts.id;
+      rv.id := term.tok.start;
       rv.ts := note.ts;
       rv.ty := note.ts.ty;
    ELSE
@@ -351,6 +307,22 @@ BEGIN
    rv.ty := Ty.PrimitiveType(Ty.KInteger);
    RETURN rv
 END NewIntConst;
+
+PROCEDURE PatchLastDest(VAR gs: GenerateState; vn: VarNameOpt);
+VAR ch: OpChunk;
+    done: BOOLEAN;
+BEGIN
+   ch := gs.code.ops.last;
+   done := FALSE;
+   WHILE ~done & (ch # NIL) DO
+      IF ch.count > 0 THEN
+         ch.ops[ch.count-1].var := vn;
+         done := TRUE
+      ELSE
+         ch := ch.prev
+      END
+   END
+END PatchLastDest;
 
 PROCEDURE DesigConstVal(gs: GenerateState; desig: Ast.Branch): St.OptConstVal;
 VAR rv: St.OptConstVal;
@@ -376,22 +348,17 @@ PROCEDURE opVARADDR(VAR gs: GenerateState; dest: VarNameOpt;
    (* Pushes a VARADDR onto the end of the CodeSeq, updating the
       type of "dest" to be correct *)
 VAR pt: Ty.PointerType;
-    prevTmp: VarNameOpt;
 BEGIN
    (* keep the types consistent so we can catch errors in
       opcode generation *)
    FAILIF(vname.ty = NIL, "opVARADDR no type on vname");
-   prevTmp := TmpForVarAddr(gs, vname);
-   IF prevTmp # NIL THEN
-      (* Just reference previous temp *)
-      dest^ := prevTmp^;
-   ELSE
-      TmpPointsToVar(gs, vname, dest);
-      pt := Ty.MkPointerType();
-      pt.ty := vname.ty;
-      dest.ty := pt;
-      puop(gs, dest, VARADDR, vname)
-   END;
+   pt := Ty.MkPointerType();
+   pt.ty := vname.ty;
+   dest.ty := pt;
+   puop(gs, dest, VARADDR, vname)
+   (* TODO - should we search backwards in the current scope to see if there's
+      already a VARADDR for this var? In the same scope, the address shouldn't
+      change. Would it be safe to change "dest" to the matched var? *)
 END opVARADDR;
 
 PROCEDURE opADDPTR(VAR gs: GenerateState; dest: VarNameOpt;
@@ -422,10 +389,12 @@ BEGIN
    pbop(gs, DontCare, STORE, lhs, rhs);
 END opSTORE;
 
-PROCEDURE GenDesigAddr(VAR gs: GenerateState; desig: Ast.Branch): VarNameOpt; 
+PROCEDURE GenDesigAddr(VAR gs: GenerateState; desig: Ast.Branch; 
+                      dest: VarNameOpt);
    (* Does address calculation code for a designator.  Not 
       meant to be called for designators for constants, as those
-      won't produce an address.  Returns a var name for the result. *) 
+      won't produce an address.  This will update the type
+      of dest. *) 
 VAR note: Ty.TypeNote;
     qident, sel: Ast.Branch;
     prevTy: Ty.Type;
@@ -443,7 +412,7 @@ BEGIN
       to callers. *)
    qident := Ast.BranchAt(desig, Ast.DesignatorQIdent);
    note := Ty.Remember(qident);
-   tp := MkTmp(gs, note.ty); 
+   tp := MkTmp(gs, note.ty);  (* TODO shouldn't this be ptr to note.ty *)
    prevTy := note.ty;
    Ty.GetQualName(qident, gs.scan, qn);
    ts := St.FindConst(gs.mod, gs.curProc.frame, qn);
@@ -467,7 +436,8 @@ BEGIN
          tp := tn
       END
    END;
-   RETURN tp
+   dest.ty := tp.ty; 
+   PatchLastDest(gs, dest)
 END GenDesigAddr;
 
 PROCEDURE BinOpFor(tk: INTEGER): INTEGER;
@@ -544,7 +514,8 @@ BEGIN
          ov := DesigConstVal(gs, br);
          IF ov = NIL THEN
             note := Ty.Remember(Ast.GetChild(br, br.childLen-1));
-            lhs := GenDesigAddr(gs, br);
+            lhs := MkTmp(gs, note.ty); (* TODO: actually, is ptr to note.ty *)
+            GenDesigAddr(gs, br, lhs);
             opFETCH(gs, dest, lhs);
          END
       ELSE
@@ -645,7 +616,7 @@ BEGIN
          note := Ty.Remember(Ast.GetChild(br, 2));
          rhs := MkTmp(gs, note.ty);
          GenExpr(gs, Ast.GetChild(br, 2), rhs); 
-         var := GenDesigAddr(gs, Ast.BranchAt(br, 0));
+         var := MkTmp(gs, note.ty);  GenDesigAddr(gs, Ast.BranchAt(br, 0), var);
          opSTORE(gs, var, rhs);
       ELSE
          Dbg.S("Unexpected binop? "); Dbg.I(op.tok.kind); Dbg.Ln;
@@ -677,7 +648,6 @@ PROCEDURE GenerateProc(VAR gs: GenerateState; proc: St.TypeSym);
    (* Generate 3 address opcodes for the given procedure *)
 VAR stmts: Ast.Branch;
 BEGIN
-   ClearProcScope(gs);
    gs.curProc := proc;
    opSCOPE(gs, MkScope(proc));
    stmts := Ast.BranchAt(proc.ty(Ty.ProcType).body, Ast.ProcBodyStmts);

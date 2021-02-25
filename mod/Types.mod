@@ -91,8 +91,6 @@ TYPE
    ProcParamDesc* = RECORD
       (* not really needed, but helpful for debugging *)
       name*: ARRAY MaxNameLen OF CHAR;  
-      seekpos*: INTEGER;
-         (* seek position of the proc name in the source *)
       ty*: Type;
       next*: ProcParam
    END;
@@ -185,7 +183,6 @@ BEGIN
    rv.name := "";
    rv.ty := NIL;
    rv.next := NIL;
-   rv.seekpos := 0;
    RETURN rv
 END MkProcParam; 
 
@@ -837,7 +834,6 @@ BEGIN
       pp := pty.params;
       WHILE BinWriter.Cond(w, pp # NIL) DO
          BinWriter.String(w, pp.name);
-         BinWriter.I32(w, pp.seekpos);
          Write(w, ss, pp.ty);
          pp := pp.next
       END
@@ -909,7 +905,6 @@ BEGIN
       WHILE BinReader.Cond(r) DO
          pp := MkProcParam();
          BinReader.String(r, pp.name);
-         BinReader.I32(r, pp.seekpos);
          pp.ty := ReadImpl(r, ss);
          pp.next := pty.params;
          pty.params := pp
