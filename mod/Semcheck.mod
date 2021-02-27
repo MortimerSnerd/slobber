@@ -1,17 +1,51 @@
 (* Semantic checking and desugaring passes for the AST *)
 MODULE Semcheck;
 IMPORT
-   Ast, Dbg, Symtab, Lex := Scanner, Ty:=Types;
+   Ast, Symtab, Lex := Scanner, Ty:=Types;
 
 TYPE
    State* = RECORD
       mod: Symtab.Module;
       scan: Lex.T
    END;
+   
+   (* Note we put on constant expressions after we have 
+      evaluated them to make sure they are constant expressions. 
+      Used by code generation later on. Not needed for constant 
+      declaration, their value is already in their TypeSym. *)
+   CVNote* = POINTER TO CVNoteDesc;
+   CVNoteDesc* = RECORD(Ast.AnnotationDesc)
+      val*: Symtab.ConstVal
+   END;
 
 VAR
    (* Fwd decls *)
    Pass1StmtSeq: PROCEDURE(st: State; proc: Symtab.TypeSym; seq: Ast.Branch);
+
+PROCEDURE NoteValue*(t: Ast.T; v: Symtab.ConstVal);
+   (* Records a value for a constant expression *)
+VAR note: CVNote;
+BEGIN
+   NEW(note);
+   note.val := v;
+   Ast.Note(t, note)
+END NoteValue;
+
+PROCEDURE RememberValue*(t: Ast.T): CVNote;
+VAR note: Ast.Annotation;
+    rv: CVNote;
+BEGIN
+   note := t.notes;
+   WHILE (note # NIL) & ~(note IS CVNote) DO
+      note := note.anext
+   END;
+   IF note = NIL THEN
+      rv := NIL
+   ELSE
+      rv := note(CVNote)
+   END;
+   RETURN rv
+END RememberValue;
 
 PROCEDURE Init*(VAR s: State; mod: Symtab.Module; scan: Lex.T);
 BEGIN
@@ -54,6 +88,7 @@ BEGIN
          rv := Ty.ErrorType
       ELSE
          Ty.Note(desigQIdent, lhsTs.ty);
+         Symtab.Note(desigQIdent, lhsTs);
          lhs := lhsTs.ty;
          ix := 1;
          err := NIL;
@@ -116,6 +151,17 @@ BEGIN
    END;
    RETURN rv
 END DesignatorType;
+
+PROCEDURE NoteDesignatorTypes(mod: Symtab.Module; scope: Symtab.Frame;
+                              desig: Ast.Branch; scan: Lex.T);
+   (* Makes type notes for the designator and the designator's
+      selectors, for use by later stages *)
+VAR ty: Ty.Type;
+    err: Ast.SrcError;
+BEGIN
+   ty := DesignatorType(mod, scope, desig, scan, err)
+END NoteDesignatorTypes;
+
 
 (* Returns the type of the selector indexed by "selIx" in the 
    designator *)
@@ -190,19 +236,26 @@ VAR rv, lhs, rhs: Ty.Type;
     br, calldesig: Ast.Branch;
     procTy: Ty.ProcType;
     param: Ast.T;
+    note: Ty.TypeNote;
 BEGIN
    rv := Ty.VoidType;
-   IF t IS Ast.Terminal THEN
+   note := Ty.Remember(t);
+   IF note # NIL THEN
+      rv := note.ty
+   ELSIF t IS Ast.Terminal THEN
       term := t(Ast.Terminal);
-      rv := Ty.TypeForTerminal(term.tok)
+      rv := Ty.TypeForTerminal(term.tok);
+      Ty.Note(t, rv)
    ELSE
       br := t(Ast.Branch);
       IF br.kind = Ast.BkUnOp THEN
-         rv := ExpressionType(mod, scope, Ast.GetChild(br, 1), scan, err)
+         rv := ExpressionType(mod, scope, Ast.GetChild(br, 1), scan, err);
+         Ty.Note(t, rv)
       ELSIF br.kind = Ast.BkSet THEN
          rv := Ty.PrimitiveType(Ty.KSet)
       ELSIF br.kind = Ast.BkParenExpr THEN
-         rv := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err)
+         rv := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err);
+         Ty.Note(t, rv)
       ELSIF br.kind = Ast.BkBinOp THEN
          term := Ast.TermAt(br, 1);
          IF term.tok.kind = Lex.COLEQ THEN
@@ -231,6 +284,9 @@ BEGIN
                   END
                END
             END
+         END;
+         IF rv.kind # Ty.KTypeError THEN
+            Ty.Note(t, rv)
          END
       ELSIF br.kind = Ast.BkCall THEN
          (* We only check the expression type here, not whether
@@ -273,7 +329,8 @@ BEGIN
                ELSE
                   rv := procTy.returnTy;
                END
-            END
+            END;
+            Ty.Note(t, rv)
          ELSE
             err := Ast.MkSrcError("LHS of '(' is not a function type.", 
                                   scan, br);
@@ -286,6 +343,38 @@ BEGIN
    END
    RETURN rv
 END ExpressionType; 
+
+PROCEDURE NestArrayAccesses(st: State; proc: Symtab.TypeSym; desig: Ast.Branch);
+   (* arr[1, 2, 3] is shorthand for arr[1][2][3].  We want to rewrite the
+      form it's parsed as to the second form, which matches how the type is
+      structured as nested arrays. *)
+VAR i, j: INTEGER; 
+    sel, exprlist, newsel: Ast.Branch;
+    selbody: Ast.T;
+BEGIN
+   FOR i := Ast.DesignatorSelectors TO desig.childLen-1 DO
+      sel := Ast.BranchAt(desig, i);
+      IF sel.n = Ast.ArrayAccess THEN
+         selbody := Ast.GetChild(sel, 0);
+         (* Guard against checking selectors we added in a previous loop *)
+         IF selbody IS Ast.Branch THEN
+            exprlist := selbody(Ast.Branch);
+            IF exprlist.kind = Ast.BkExpList THEN
+               FOR j := 0 TO exprlist.childLen-1 DO
+                  IF j = 0 THEN
+                     (* replace the original array selector expr with this expression *)
+                     Ast.SetChild(sel, 0, Ast.GetChild(exprlist, j))
+                  ELSE
+                     newsel := Ast.MkSelector(Ast.ArrayAccess);
+                     Ast.AddChild(newsel, Ast.GetChild(exprlist, j));
+                     Ast.InsertChild(desig, i+j, newsel);
+                  END
+               END;
+            END
+         END
+      END
+   END
+END NestArrayAccesses;
       
 PROCEDURE FixupDesignator(st: State; proc: Symtab.TypeSym; desig: Ast.Branch);
 VAR qn: Ty.QualName;
@@ -302,7 +391,8 @@ BEGIN
          Ast.SetChild(qname, 1, Ast.GetChild(qname, 0));
          Ast.SetChild(qname, 0, NIL);
          Ast.InsertChild(desig, Ast.DesignatorSelectors, nsel)
-   END
+   END;
+   NestArrayAccesses(st, proc, desig)
 END FixupDesignator;
 
 PROCEDURE LastIsTypeGuard(br: Ast.Branch): BOOLEAN;
@@ -361,19 +451,22 @@ PROCEDURE Pass0Proc(st: State; proc: Symtab.TypeSym);
        chld: Ast.Branch;
    BEGIN
       IF br.kind = Ast.BkDesignator THEN
-         FixupDesignator(st, proc, br)
-      ELSE
-         FOR i := 0 TO br.childLen-1 DO
-            n := Ast.GetChild(br, i);
-            IF n IS Ast.Branch THEN
-               chld := n(Ast.Branch);
+         FixupDesignator(st, proc, br);
+         NoteDesignatorTypes(st.mod, proc.frame, br, st.scan);
+      END;
+      FOR i := 0 TO br.childLen-1 DO
+         n := Ast.GetChild(br, i);
+         IF n IS Ast.Branch THEN
+            chld := n(Ast.Branch);
+            IF chld.kind = Ast.BkDesignator THEN
+               FixupDesignator(st, proc, chld);
+               FixupTyGuardFunctions(st, proc, br, i);
+               chld := Ast.BranchAt(br, i);
                IF chld.kind = Ast.BkDesignator THEN
-                  FixupDesignator(st, proc, chld);
-                  FixupTyGuardFunctions(st, proc, br, i);
-                  chld := Ast.BranchAt(br, i)
-               END;
-               Walk(st, proc, chld)
-            END
+                  NoteDesignatorTypes(st.mod, proc.frame, chld, st.scan);
+               END
+            END;
+            Walk(st, proc, chld)
          END
       END
    END Walk;
@@ -746,6 +839,8 @@ VAR vname: Ast.Terminal;
     vsym: Symtab.TypeSym;
     qn: Ty.QualName;
     expr: Ast.T;
+    err: Ast.SrcError;
+    byval: Symtab.ConstVal;
 BEGIN
    vname := Ast.TermAt(stmt, Ast.ForStmtVarName);
    Ty.GetUnqualName(vname, st.scan, qn);
@@ -760,8 +855,17 @@ BEGIN
    ExprShouldBeInteger(st, proc, expr);
    CheckExpression(st, proc, expr);
    expr := Ast.GetChild(stmt, Ast.ForStmtBy);
-   ExprShouldBeInteger(st, proc, expr);
-   CheckExpression(st, proc, expr);
+   IF expr # NIL THEN
+      err := Symtab.EvalConstExpr(st.mod, proc.frame, st.scan, 
+                                  expr, byval);
+      IF err = NIL THEN
+         NoteValue(expr, byval);
+         ExprShouldBeInteger(st, proc, expr);
+         CheckExpression(st, proc, expr);
+      ELSE
+         Symtab.AddErr(st.mod, err)
+      END;
+   END;
    Pass1StmtSeq(st, proc, Ast.BranchAt(stmt, Ast.ForStmtBody))
 END CheckForStmt;
 
@@ -883,8 +987,9 @@ BEGIN
       IF err = NIL THEN
          tyr := ExpressionType(st.mod, proc.frame, rhs, st.scan, err);
          IF err = NIL THEN
+            Ty.Note(rhs, tyr);
             IF ~Ty.Equal(tyl, tyr) THEN
-               CheckAssignmentValid(st, proc, desig, rhs, tyl, tyr)
+               CheckAssignmentValid(st, proc, desig, rhs, tyl, tyr);
             END
          ELSE
             Symtab.AddErr(st.mod, err)

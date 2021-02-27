@@ -42,6 +42,8 @@ TYPE
    TypeSymDesc* = RECORD
       kind*: INTEGER;  (* ts* constants *)
       name*: ARRAY MaxNameLen OF CHAR;
+      id*: INTEGER;
+         (* Unique for this typesym in the source file it was defined in *)
       ty*: Ty.Type;
       export*: BOOLEAN;
       val*: OptConstVal;
@@ -84,10 +86,10 @@ TYPE
    Module* = POINTER TO ModuleDesc;
    ModuleDesc* = RECORD
       name*, localAlias*: ARRAY MaxNameLen OF CHAR;
-      imports: Module;
+      imports*: Module;
          (* Linked list of imported modules *)
 
-      importNext: Module;
+      importNext*: Module;
          (* link for list of module imports *)
 
       frame*: Frame;
@@ -109,6 +111,12 @@ TYPE
             semantic checking *)
    END; 
 
+   (* Annotates AST nodes with the corresponding TypeSym *)
+   TSAnnotation* = POINTER TO TSAnnotationDesc;
+   TSAnnotationDesc* = RECORD(Ast.AnnotationDesc)
+      ts*: TypeSym
+   END;
+
 VAR
    (* fwd decl *)
    CvtStrucType: PROCEDURE(mod: Module; frame: Frame; t: Ast.T; scan: Lex.T; 
@@ -119,6 +127,30 @@ VAR
    (* Symtab for builtin functions that are globally available. Should
       only have procedures *)
    Builtins: Module;
+
+PROCEDURE Note*(t: Ast.T; ts: TypeSym);
+VAR n: TSAnnotation;
+BEGIN
+   NEW(n);
+   n.ts := ts;
+   Ast.Note(t, n)
+END Note;
+
+PROCEDURE Remember*(t: Ast.T): TSAnnotation;
+VAR an: Ast.Annotation;
+    rv: TSAnnotation;
+BEGIN
+   an := t.notes;
+   WHILE (an # NIL) & ~(an IS TSAnnotation) DO
+      an := an.anext
+   END;
+   IF an # NIL THEN
+      rv := an(TSAnnotation)
+   ELSE
+      rv := NIL
+   END;
+   RETURN rv
+END Remember;
 
 PROCEDURE MkFrame(owner: Module; chainTo: Frame): Frame;
 VAR rv: Frame;
@@ -159,6 +191,7 @@ BEGIN
    rv.export := FALSE;
    rv.next := NIL;
    rv.frame := NIL;
+   rv.id := 0;
    RETURN rv
 END MkTypeSym; 
 
@@ -635,6 +668,7 @@ BEGIN
          FOR j := 0 TO fpsec.childLen-2 DO
             fld := Ty.MkProcParam();
             name := Ast.TermAt(fpsec, j);
+            fld.seekpos := name.tok.start;
             Lex.Extract(scan, name.tok, fld.name);
             fld.ty := paramTy;
             fld.next := paramList;
@@ -681,6 +715,7 @@ BEGIN
    param := proc.params;
    WHILE param # NIL DO
       ts := MkTypeSym(tsProcParam);
+      ts.id := param.seekpos;
       Strings.Append(param.name, ts.name);
       ts.ty := param.ty;
       ts.next := rv.vars;
@@ -788,7 +823,7 @@ BEGIN
                Lex.Extract(scan, fname.tok, fld.name);
                fld.ty := ftype;
                fld.next := rt.fields;
-               fld.export := fname.export;
+               IF fname.export THEN INCL(fld.flags, Ty.Export) END;
                rt.fields := fld
             END
          END;
@@ -868,6 +903,7 @@ BEGIN
       FOR i := 0 TO identList.childLen-1 DO
          fv := MkTypeSym(tsVar);
          name := Ast.TermAt(identList, i);
+         fv.id := name.tok.start;
          Lex.Extract(scan, name.tok, fv.name);
          fv.export := name.export;
          fv.ty := vtype;
@@ -909,6 +945,7 @@ BEGIN
          ASSERT(br.kind = Ast.BkConstDeclaration);
          id := Ast.TermAt(br, 0);
          Lex.Extract(scan, id.tok, cd.name);
+         cd.id := id.tok.start;
          cd.export := id.export;
          err := EvalConstExpr(rv, frame, scan, Ast.GetChild(br, 1), cd.val^);
          IF err # NIL THEN
@@ -936,6 +973,7 @@ BEGIN
          procDecl := Ast.BranchAt(procDecls, i);
          ent := MkTypeSym(tsProc);
          fname := Ast.TermAt(procDecl, Ast.ProcedureDeclName);
+         ent.id := fname.tok.start;
          Lex.Extract(scan, fname.tok, ent.name);
          ent.export := fname.export;
          (* proc decls get their own frame for their child declarations *) 
@@ -1011,6 +1049,7 @@ BEGIN
          IF err = NIL THEN
             t := Ast.TermAt(br, Ast.TypeDeclName);
             Lex.Extract(scan, t.tok, ty.name);
+            ty.id := t.tok.start;
             ty.export := t.export;
             MkSrcName(ty.ty);
             Strings.Append(mod.name, ty.ty.srcName.module);
@@ -1072,6 +1111,7 @@ BEGIN
          BinWriter.Bool(w, TRUE);
          BinWriter.I8(w, ts.kind);
          BinWriter.String(w, ts.name);
+         BinWriter.I32(w, ts.id);
          Ty.Write(w, ss, ts.ty);
          IF BinWriter.Cond(w, ts.val # NIL) THEN
             WriteConstVal(w, ts.val^)
@@ -1091,6 +1131,7 @@ BEGIN
       ts := MkTypeSym(0);
       BinReader.I8(w, ts.kind);
       BinReader.String(w, ts.name);
+      BinReader.I32(w, ts.id);
       ts.ty := Ty.Read(w, ss);
       IF BinReader.Cond(w) THEN
          NEW(ts.val);
@@ -1129,6 +1170,33 @@ BEGIN
    RETURN fr
 END ReadFrame;
 
+PROCEDURE WriteImportList(VAR w: BinWriter.T; mod: Module);
+   (* Writes just the names of the imported modules. 
+      Just used to chase down dependencies. *)
+VAR m: Module;
+BEGIN
+   m := mod.imports;
+   WHILE BinWriter.Cond(w, m # NIL) DO
+      BinWriter.String(w, m.name);
+      m := m.importNext
+   END
+END WriteImportList;
+
+PROCEDURE ReadImportList(VAR w: BinReader.T; mod: Module);
+   (* Reads a skeleton import list.  The modules are empty, 
+      and just have the import names, enough for 
+      dependency chasing. *)
+VAR m: Module;
+BEGIN
+   mod.imports := NIL;
+   WHILE BinReader.Cond(w) DO
+      NEW(m);
+      BinReader.String(w, m.name);
+      m.importNext := mod.imports;
+      mod.imports := m
+   END
+END ReadImportList; 
+
 (* Writes out a symbol table that contains just the public members.
    This acts as an interface file that we can load to resolve
    names and types for imported modules when compiling *)
@@ -1139,6 +1207,7 @@ BEGIN
    BinWriter.String(w, FileMagic);
    BinWriter.I32(w, SymtabVer);
    BinWriter.String(w, mod.name);
+   WriteImportList(w, mod);
    WriteFrame(w, ss, mod.frame);
 END Write;
 
@@ -1158,6 +1227,7 @@ BEGIN
    ASSERT(ver = SymtabVer);
    BinReader.String(w, mod.name);
    mod.localAlias := mod.name;
+   ReadImportList(w, mod);
    mod.frame := ReadFrame(w, ss, mod);
    RETURN mod
 END Read;

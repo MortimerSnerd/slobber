@@ -14,12 +14,12 @@ BEGIN
    Dbg.Ln;
 
    par := Par.NewFromFile("Parser.mod");
-   root := Par.ParseModule(par);
+   root := Par.ParseModule(par, FALSE);
    root.ops.toStr(root, par.scan.buf, 0);
    Dbg.Ln;   
 
    par := Par.NewFromFile("Render.mod");
-   root := Par.ParseModule(par);
+   root := Par.ParseModule(par, FALSE);
    root.ops.toStr(root, par.scan.buf, 0);
    Dbg.Ln;   
 

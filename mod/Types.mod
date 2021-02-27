@@ -23,6 +23,7 @@ CONST
    (* type flags *)
    Export*=0;Var*=1;OpenArray*=2;Builtin*=3;FromLiteral*=4;
    Visited=5;
+   Synthetic*=6;  (* Generated, do not save out to a file *)
 
    MaxNameLen=64;
    PrimLookupLen=NumTypeKinds;
@@ -70,20 +71,29 @@ TYPE
    RecordFieldDesc* = RECORD
       name*: ARRAY MaxNameLen OF CHAR;
       ty*: Type;
-      export*: BOOLEAN;
-      next*: RecordField
+      flags*: SET;
+      next*: RecordField;
+      offset*: INTEGER
+         (* Byte offset into struct.  Not filled out here, 
+            location depends on target arch *)
    END;
 
    RecordType* = POINTER TO RecordTypeDesc;
    RecordTypeDesc* = RECORD(TypeDesc)
       base*: Type;
-      fields*: RecordField
+      fields*: RecordField;
+      byteSize*: INTEGER
+         (* Not filled out here, but by the arch specific
+            target.  We don't know without knowing 
+            alignment restrictions *)
    END;
 
    ProcParam* = POINTER TO ProcParamDesc;
    ProcParamDesc* = RECORD
       (* not really needed, but helpful for debugging *)
       name*: ARRAY MaxNameLen OF CHAR;  
+      seekpos*: INTEGER;
+         (* seek position of the proc name in the source *)
       ty*: Type;
       next*: ProcParam
    END;
@@ -124,6 +134,10 @@ TYPE
       types: SSType
          (* Named type references *)
    END;
+
+   (* Signature for function that calculates the
+      required alignment for a type *)
+   AlignFn* = PROCEDURE(t: Type): INTEGER;
 
 VAR
    PrimNames:  ARRAY PrimLookupLen OF ARRAY 16 OF CHAR;
@@ -172,6 +186,7 @@ BEGIN
    rv.name := "";
    rv.ty := NIL;
    rv.next := NIL;
+   rv.seekpos := 0;
    RETURN rv
 END MkProcParam; 
 
@@ -207,7 +222,8 @@ BEGIN
    rv.name := "";
    rv.ty := NIL;
    rv.next := NIL;
-   rv.export := FALSE;
+   rv.flags := {};
+   rv.offset := 0;
    RETURN rv
 END MkRecordField; 
    
@@ -219,7 +235,8 @@ BEGIN
    rv.flags := {};
    rv.srcName := NIL;
    rv.base := NIL;
-   rv.fields := NIL
+   rv.fields := NIL;
+   rv.byteSize := 0;
    RETURN rv
 END MkRecordType;
 
@@ -420,7 +437,99 @@ BEGIN
    RETURN rv
 END FindField; 
 
+PROCEDURE FindFieldStr*(rty: RecordType; name: ARRAY OF CHAR): RecordField;
+   (* Find a field by a string.  Use FindField() if you have a Lex.token *)
+VAR rv, fld: RecordField; 
+BEGIN
+   rv := NIL;
+   WHILE (rv = NIL) & (rty # NIL) DO
+      fld := rty.fields;
+      WHILE (rv = NIL) & (fld # NIL) DO
+         IF Ast.StringEq(fld.name, name) THEN
+            rv := fld
+         ELSE
+            fld := fld.next
+         END
+      END;
+      IF rty.base = NIL THEN
+         rty := NIL
+      ELSE
+         rty := rty.base(RecordType)
+      END
+   END
+   RETURN rv
+END FindFieldStr;    
 
+(* Writes a short one line version of the type to the debug output, 
+   preferring the name for the type if there is one *)
+PROCEDURE DbgSummary*(t: Type);
+VAR art: ArrayType;
+    rty: RecordType;
+    fld: RecordField;
+    pfld: ProcParam;
+    proc: ProcType;
+BEGIN
+   IF t.srcName # NIL THEN
+      Dbg.S(t.srcName.module); Dbg.S(".");
+      Dbg.S(t.srcName.name)
+   ELSE
+      CASE t.kind OF
+      KByte: Dbg.S("BYTE")
+      |KInteger: Dbg.S("INTEGER")
+      |KBoolean: Dbg.S("BOOLEAN")
+      |KReal: Dbg.S("REAL");
+      |KChar: Dbg.S("CHAR"); 
+      |KSet: Dbg.S("SET")
+      |KPrimName: Dbg.S("PRIMTYNAME")
+      |KVoid: Dbg.S("VOID")
+      |KArray:
+         art := t(ArrayType);
+         Dbg.S("ARRAY ");
+         IF ~(OpenArray IN t.flags) THEN
+             Dbg.I(art.dim); Dbg.S(" ");
+         END;
+         Dbg.S("OF ");
+         DbgSummary(art.ty)
+      |KPointer:
+         Dbg.S("POINTER TO ");
+         DbgSummary(t(PointerType).ty)
+      |KRecord:
+         rty := t(RecordType);
+         fld := rty.fields;
+         Dbg.S("RECORD");
+         IF rty.base # NIL THEN
+            Dbg.S("("); DbgSummary(rty.base); Dbg.S(")")
+         END;
+         Dbg.S(" [");
+         WHILE fld # NIL DO
+            Dbg.S(" ");
+            Dbg.S(fld.name);
+            IF fld.next # NIL THEN Dbg.S(",") END;
+            fld := fld.next
+         END;
+         Dbg.S("]")
+      |KTypeError: Dbg.S("ERROR")
+      |KDeferredPtrTarget: Dbg.S("DEFERRED PTR")
+      |KProcedure: 
+         Dbg.S("PROCEDURE");
+         proc := t(ProcType);
+         pfld := proc.params;
+         IF pfld # NIL THEN
+            Dbg.S("(");
+            WHILE pfld # NIL DO
+               DbgSummary(pfld.ty);
+               IF pfld.next # NIL THEN Dbg.S(",") END;
+               pfld := pfld.next
+            END;
+         END;
+         IF proc.returnTy # NIL THEN
+            Dbg.S(": ");
+            DbgSummary(proc.returnTy)
+         END
+      END
+   END
+END DbgSummary;
+         
 (* Writes a pretty version of a type to the debug output *)
 PROCEDURE DbgPrint*(t: Type; indent: INTEGER);
 VAR art: ArrayType;
@@ -460,7 +569,7 @@ BEGIN
       WHILE fld # NIL DO
          Dbg.Ln; Dbg.Ind(indent+1);
          Dbg.S(fld.name);
-         IF fld.export THEN Dbg.S("*") END;
+         IF Export IN fld.flags THEN Dbg.S("*") END;
          Dbg.Ln; DbgPrint(fld.ty, indent+2);
          fld := fld.next
       END
@@ -738,12 +847,18 @@ BEGIN
          Write(w, ss, rty.base)
       END;
       rp := rty.fields;
-      WHILE BinWriter.Cond(w, rp # NIL) DO
-         BinWriter.String(w, rp.name);
-         Write(w, ss, rp.ty);
-         BinWriter.Bool(w, rp.export);
+      (* Since we're exluding some fields, we have to write out
+         the bool sentinels normally handled by BinWriter.Cond *)
+      WHILE rp # NIL DO
+         IF ~(Synthetic IN rp.flags) THEN
+            BinWriter.Bool(w, TRUE);
+            BinWriter.String(w, rp.name);
+            Write(w, ss, rp.ty);
+            BinWriter.I32(w, SYSTEM.VAL(INTEGER, rp.flags));
+         END;
          rp := rp.next
-      END
+      END;
+      BinWriter.Bool(w, FALSE);
    |KProcedure:
       pty := ty(ProcType);
       IF BinWriter.Cond(w, pty.returnTy # NIL) THEN
@@ -752,6 +867,7 @@ BEGIN
       pp := pty.params;
       WHILE BinWriter.Cond(w, pp # NIL) DO
          BinWriter.String(w, pp.name);
+         BinWriter.I32(w, pp.seekpos);
          Write(w, ss, pp.ty);
          pp := pp.next
       END
@@ -769,6 +885,7 @@ VAR kind, vers, flags: INTEGER;
     rv: Type;
     sst: SSType;
     qn: POINTER TO QualName;
+    t0: INTEGER;
 BEGIN
    BinReader.I32(r, vers); ASSERT(vers = BinFmtVer);
    BinReader.I8(r, kind);
@@ -809,7 +926,8 @@ BEGIN
          rp := MkRecordField();
          BinReader.String(r, rp.name);
          rp.ty := ReadImpl(r, ss);
-         BinReader.Bool(r, rp.export);
+         BinReader.I32(r, t0);
+         rp.flags := SYSTEM.VAL(SET, t0);
          rp.next := rty.fields;
          rty.fields := rp
       END;
@@ -823,6 +941,7 @@ BEGIN
       WHILE BinReader.Cond(r) DO
          pp := MkProcParam();
          BinReader.String(r, pp.name);
+         BinReader.I32(r, pp.seekpos);
          pp.ty := ReadImpl(r, ss);
          pp.next := pty.params;
          pty.params := pp
@@ -930,6 +1049,7 @@ BEGIN
    END
    RETURN rv
 END AcceptPrimTyName;
+
 
 (* Given a type constant for a primitive type, 
    returns an instance for it.  Returns NIL if

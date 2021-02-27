@@ -95,7 +95,7 @@ BEGIN
       IF fname[0] # 0X THEN
          Dbg.S("Checking "); Dbg.S(fname);Dbg.S("..."); 
          par := Par.NewFromFile(fname);
-         ast := Par.ParseModule(par);
+         ast := Par.ParseModule(par, FALSE);
          mod := Symtab.BuildModule(ast, par.scan);
          CheckTypeWriting(mod);
          Semcheck.Init(scstate, mod, par.scan);

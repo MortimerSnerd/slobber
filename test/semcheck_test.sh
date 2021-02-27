@@ -10,7 +10,7 @@
 # bootstrapping problems.
 
 BINDIR=`cd ../mod && pwd`
-MKEXE=$BINDIR/MkSymtab
+MKEXE=$BINDIR/Compile
 
 # We reference some libraries that come with OBNC, so we'll need
 # to make symbols for those as well. We need the obnc source
@@ -22,7 +22,7 @@ mkSym() {
    local log=/tmp/mksym.log
 
    echo "$MKEXE $*"
-   $MKEXE $* 2>&1 > $log
+   $MKEXE $* 2>&1 |tee $log
    if [ "$?" != "0" ]; then
       echo ""
       cat $log
@@ -50,20 +50,12 @@ rm -rf symout
 mkdir symout
 cd symout
 
-# Build symbols for libraries from obnc we use first.
-mkSym $OBNCSRC/Files.obn $OBNCSRC/In.obn $OBNCSRC/Input0.obn
-mkSym $OBNCSRC/Input.obn $OBNCSRC/Out.obn $OBNCSRC/Strings.obn
-mkSym $OBNCEXTSRC/extArgs.obn $OBNCEXTSRC/extConvert.obn
-mkSym $OBNCEXTSRC/extEnv.obn
+# List of main entry points.  We use the compiler to generate
+# just the symbols. (which forces semchecking).
+ROOTS="TestScanner.mod TestParser.mod TestRender.mod TestSymtab.mod\
+       MkSymtab.mod DumpAst.mod Compile.mod"
 
-# List of files ordered so files that are imported come before
-# the files that import them.
-FILES="Path.mod Dbg.mod Config.mod BinReader.mod BinWriter.mod\
-       Scanner.mod Ast.mod Types.mod Symtab.mod Semcheck.mod\
-       Parser.mod DumpAst.mod MkSymtab.mod Render.mod TestParser.mod\
-       TestRender.mod TestScanner.mod TestSymtab.mod"
-
-for f in $FILES; do
-   mkSym ../../mod/$f
+for f in $ROOTS; do
+   mkSym -s ../../mod ../../mod/$f
 done
 
