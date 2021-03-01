@@ -152,6 +152,17 @@ BEGIN
    RETURN rv
 END DesignatorType;
 
+PROCEDURE NoteDesignatorTypes(mod: Symtab.Module; scope: Symtab.Frame;
+                              desig: Ast.Branch; scan: Lex.T);
+   (* Makes type notes for the designator and the designator's
+      selectors, for use by later stages *)
+VAR ty: Ty.Type;
+    err: Ast.SrcError;
+BEGIN
+   ty := DesignatorType(mod, scope, desig, scan, err)
+END NoteDesignatorTypes;
+
+
 (* Returns the type of the selector indexed by "selIx" in the 
    designator *)
 PROCEDURE DesignatorSelectorType(mod: Symtab.Module; scope: Symtab.Frame; 
@@ -332,6 +343,38 @@ BEGIN
    END
    RETURN rv
 END ExpressionType; 
+
+PROCEDURE NestArrayAccesses(st: State; proc: Symtab.TypeSym; desig: Ast.Branch);
+   (* arr[1, 2, 3] is shorthand for arr[1][2][3].  We want to rewrite the
+      form it's parsed as to the second form, which matches how the type is
+      structured as nested arrays. *)
+VAR i, j: INTEGER; 
+    sel, exprlist, newsel: Ast.Branch;
+    selbody: Ast.T;
+BEGIN
+   FOR i := Ast.DesignatorSelectors TO desig.childLen-1 DO
+      sel := Ast.BranchAt(desig, i);
+      IF sel.n = Ast.ArrayAccess THEN
+         selbody := Ast.GetChild(sel, 0);
+         (* Guard against checking selectors we added in a previous loop *)
+         IF selbody IS Ast.Branch THEN
+            exprlist := selbody(Ast.Branch);
+            IF exprlist.kind = Ast.BkExpList THEN
+               FOR j := 0 TO exprlist.childLen-1 DO
+                  IF j = 0 THEN
+                     (* replace the original array selector expr with this expression *)
+                     Ast.SetChild(sel, 0, Ast.GetChild(exprlist, j))
+                  ELSE
+                     newsel := Ast.MkSelector(Ast.ArrayAccess);
+                     Ast.AddChild(newsel, Ast.GetChild(exprlist, j));
+                     Ast.InsertChild(desig, i+j, newsel);
+                  END
+               END;
+            END
+         END
+      END
+   END
+END NestArrayAccesses;
       
 PROCEDURE FixupDesignator(st: State; proc: Symtab.TypeSym; desig: Ast.Branch);
 VAR qn: Ty.QualName;
@@ -348,7 +391,8 @@ BEGIN
          Ast.SetChild(qname, 1, Ast.GetChild(qname, 0));
          Ast.SetChild(qname, 0, NIL);
          Ast.InsertChild(desig, Ast.DesignatorSelectors, nsel)
-   END
+   END;
+   NestArrayAccesses(st, proc, desig)
 END FixupDesignator;
 
 PROCEDURE LastIsTypeGuard(br: Ast.Branch): BOOLEAN;
@@ -407,19 +451,22 @@ PROCEDURE Pass0Proc(st: State; proc: Symtab.TypeSym);
        chld: Ast.Branch;
    BEGIN
       IF br.kind = Ast.BkDesignator THEN
-         FixupDesignator(st, proc, br)
-      ELSE
-         FOR i := 0 TO br.childLen-1 DO
-            n := Ast.GetChild(br, i);
-            IF n IS Ast.Branch THEN
-               chld := n(Ast.Branch);
+         FixupDesignator(st, proc, br);
+         NoteDesignatorTypes(st.mod, proc.frame, br, st.scan);
+      END;
+      FOR i := 0 TO br.childLen-1 DO
+         n := Ast.GetChild(br, i);
+         IF n IS Ast.Branch THEN
+            chld := n(Ast.Branch);
+            IF chld.kind = Ast.BkDesignator THEN
+               FixupDesignator(st, proc, chld);
+               FixupTyGuardFunctions(st, proc, br, i);
+               chld := Ast.BranchAt(br, i);
                IF chld.kind = Ast.BkDesignator THEN
-                  FixupDesignator(st, proc, chld);
-                  FixupTyGuardFunctions(st, proc, br, i);
-                  chld := Ast.BranchAt(br, i)
-               END;
-               Walk(st, proc, chld)
-            END
+                  NoteDesignatorTypes(st.mod, proc.frame, chld, st.scan);
+               END
+            END;
+            Walk(st, proc, chld)
          END
       END
    END Walk;

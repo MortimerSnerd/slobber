@@ -23,6 +23,7 @@ CONST
    (* type flags *)
    Export*=0;Var*=1;OpenArray*=2;Builtin*=3;FromLiteral*=4;
    Visited=5;
+   Synthetic*=6;  (* Generated, do not save out to a file *)
 
    MaxNameLen=64;
    PrimLookupLen=NumTypeKinds;
@@ -70,7 +71,7 @@ TYPE
    RecordFieldDesc* = RECORD
       name*: ARRAY MaxNameLen OF CHAR;
       ty*: Type;
-      export*: BOOLEAN;
+      flags*: SET;
       next*: RecordField;
       offset*: INTEGER
          (* Byte offset into struct.  Not filled out here, 
@@ -91,6 +92,8 @@ TYPE
    ProcParamDesc* = RECORD
       (* not really needed, but helpful for debugging *)
       name*: ARRAY MaxNameLen OF CHAR;  
+      seekpos*: INTEGER;
+         (* seek position of the proc name in the source *)
       ty*: Type;
       next*: ProcParam
    END;
@@ -183,6 +186,7 @@ BEGIN
    rv.name := "";
    rv.ty := NIL;
    rv.next := NIL;
+   rv.seekpos := 0;
    RETURN rv
 END MkProcParam; 
 
@@ -218,7 +222,7 @@ BEGIN
    rv.name := "";
    rv.ty := NIL;
    rv.next := NIL;
-   rv.export := FALSE;
+   rv.flags := {};
    rv.offset := 0;
    RETURN rv
 END MkRecordField; 
@@ -433,6 +437,29 @@ BEGIN
    RETURN rv
 END FindField; 
 
+PROCEDURE FindFieldStr*(rty: RecordType; name: ARRAY OF CHAR): RecordField;
+   (* Find a field by a string.  Use FindField() if you have a Lex.token *)
+VAR rv, fld: RecordField; 
+BEGIN
+   rv := NIL;
+   WHILE (rv = NIL) & (rty # NIL) DO
+      fld := rty.fields;
+      WHILE (rv = NIL) & (fld # NIL) DO
+         IF Ast.StringEq(fld.name, name) THEN
+            rv := fld
+         ELSE
+            fld := fld.next
+         END
+      END;
+      IF rty.base = NIL THEN
+         rty := NIL
+      ELSE
+         rty := rty.base(RecordType)
+      END
+   END
+   RETURN rv
+END FindFieldStr;    
+
 (* Writes a short one line version of the type to the debug output, 
    preferring the name for the type if there is one *)
 PROCEDURE DbgSummary*(t: Type);
@@ -542,7 +569,7 @@ BEGIN
       WHILE fld # NIL DO
          Dbg.Ln; Dbg.Ind(indent+1);
          Dbg.S(fld.name);
-         IF fld.export THEN Dbg.S("*") END;
+         IF Export IN fld.flags THEN Dbg.S("*") END;
          Dbg.Ln; DbgPrint(fld.ty, indent+2);
          fld := fld.next
       END
@@ -820,12 +847,18 @@ BEGIN
          Write(w, ss, rty.base)
       END;
       rp := rty.fields;
-      WHILE BinWriter.Cond(w, rp # NIL) DO
-         BinWriter.String(w, rp.name);
-         Write(w, ss, rp.ty);
-         BinWriter.Bool(w, rp.export);
+      (* Since we're exluding some fields, we have to write out
+         the bool sentinels normally handled by BinWriter.Cond *)
+      WHILE rp # NIL DO
+         IF ~(Synthetic IN rp.flags) THEN
+            BinWriter.Bool(w, TRUE);
+            BinWriter.String(w, rp.name);
+            Write(w, ss, rp.ty);
+            BinWriter.I32(w, SYSTEM.VAL(INTEGER, rp.flags));
+         END;
          rp := rp.next
-      END
+      END;
+      BinWriter.Bool(w, FALSE);
    |KProcedure:
       pty := ty(ProcType);
       IF BinWriter.Cond(w, pty.returnTy # NIL) THEN
@@ -834,6 +867,7 @@ BEGIN
       pp := pty.params;
       WHILE BinWriter.Cond(w, pp # NIL) DO
          BinWriter.String(w, pp.name);
+         BinWriter.I32(w, pp.seekpos);
          Write(w, ss, pp.ty);
          pp := pp.next
       END
@@ -851,6 +885,7 @@ VAR kind, vers, flags: INTEGER;
     rv: Type;
     sst: SSType;
     qn: POINTER TO QualName;
+    t0: INTEGER;
 BEGIN
    BinReader.I32(r, vers); ASSERT(vers = BinFmtVer);
    BinReader.I8(r, kind);
@@ -891,7 +926,8 @@ BEGIN
          rp := MkRecordField();
          BinReader.String(r, rp.name);
          rp.ty := ReadImpl(r, ss);
-         BinReader.Bool(r, rp.export);
+         BinReader.I32(r, t0);
+         rp.flags := SYSTEM.VAL(SET, t0);
          rp.next := rty.fields;
          rty.fields := rp
       END;
@@ -905,6 +941,7 @@ BEGIN
       WHILE BinReader.Cond(r) DO
          pp := MkProcParam();
          BinReader.String(r, pp.name);
+         BinReader.I32(r, pp.seekpos);
          pp.ty := ReadImpl(r, ss);
          pp.next := pty.params;
          pty.params := pp
