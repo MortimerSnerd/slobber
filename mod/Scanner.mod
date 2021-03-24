@@ -58,12 +58,39 @@ TYPE
    END;
 
 VAR
-   (* Lookup table from token number to a string *)
-   TokenNames*: ARRAY NumTok OF ARRAY 32 OF CHAR;
+   (* Lookup table from token number to a string.  TokenNames is just
+      a symbolic representation, TokenRep is the actual token character(s)
+      as they would show up in the source *)
+   TokenNames*, TokenReps*: ARRAY NumTok OF ARRAY 32 OF CHAR;
    TokenFlags*: ARRAY NumTok OF SET;
 
    (* Tmp var used by SetupFlags *)
    CurFlag: INTEGER;
+
+PROCEDURE MkValTok*(lx: T; kind: TokKind; txt: ARRAY OF CHAR; 
+                    VAR tok: Token);
+   (* Creates a token whose text determines the "value".  (Id, 
+      int constant, etc).  Puts the result in "tok". *)
+VAR i, ln: INTEGER;
+BEGIN
+   ln := Strings.Length(txt);
+   FOR i := 0 TO ln-1 DO
+      lx.buf[i+lx.len] := txt[i]
+   END;
+   tok.start := lx.len;
+   lx.len := lx.len + ln;
+   tok.kind := kind;
+   tok.len := ln;
+END MkValTok;
+
+PROCEDURE MkTok*(lx: T; kind: TokKind; VAR res: Token);
+   (* Only supplied for Ast rewriting, creates a token with
+      the given kind at the end of the buffer, and 
+      returns the value in res *)
+BEGIN
+   MkValTok(lx, kind, TokenReps[kind], res)
+END MkTok;
+
 
 PROCEDURE ColForPos*(p:T; pos: INTEGER): INTEGER;
 VAR rv, i: INTEGER;
@@ -604,65 +631,65 @@ BEGIN
    TokenNames[ConstHexString] := "ConstHexString";
    TokenNames[ConstReal] := "ConstReal";
    TokenNames[ConstString] := "ConstString";
-   TokenNames[PLUS] := "PLUS";
-   TokenNames[MINUS] := "MINUS";
-   TokenNames[ASTERISK] := "ASTERISK";
-   TokenNames[FSLASH] := "FSLASH";
-   TokenNames[TILDE] := "TILDE";
-   TokenNames[AMPERSAND] := "AMPERSAND";
-   TokenNames[DOT] := "DOT";
-   TokenNames[COMMA] := "COMMA";
-   TokenNames[SEMI] := "SEMI";
-   TokenNames[BAR] := "BAR";
-   TokenNames[LPAREN] := "LPAREN";
-   TokenNames[LBRACKET] := "LBRACKET";
-   TokenNames[LBRACE] := "LBRACE";
-   TokenNames[COLEQ] := "COLEQ";
-   TokenNames[CARET] := "CARET";
-   TokenNames[EQ] := "EQ";
-   TokenNames[OCTOTHORPE] := "OCTOTHORPE";
-   TokenNames[LT] := "LT";
-   TokenNames[GT] := "GT";
-   TokenNames[LTE] := "LTE";
-   TokenNames[GTE] := "GTE";
-   TokenNames[DOTDOT] := "DOTDOT";
-   TokenNames[COLON] := "COLON";
-   TokenNames[RPAREN] := "RPAREN";
-   TokenNames[RBRACKET] := "RBRACKET";
-   TokenNames[RBRACE] := "RBRACE";
-   TokenNames[KARRAY] := "KARRAY";
-   TokenNames[KBEGIN] := "KBEGIN";
-   TokenNames[KEND] := "KEND";
-   TokenNames[KBY] := "KBY";
-   TokenNames[KCASE] := "KCASE";
-   TokenNames[KCONST] := "KCONST";
-   TokenNames[KDIV] := "KDIV";
-   TokenNames[KDO] := "KDO";
-   TokenNames[KELSE] := "KELSE";
-   TokenNames[KELSIF] := "KELSIF";
-   TokenNames[KFALSE] := "KFALSE";
-   TokenNames[KFOR] := "KFOR";
-   TokenNames[KIF] := "KIF";
-   TokenNames[KIMPORT] := "KIMPORT";
-   TokenNames[KIN] := "KIN";
-   TokenNames[KIS] := "KIS";
-   TokenNames[KMOD] := "KMOD";
-   TokenNames[KMODULE] := "KMODULE";
-   TokenNames[KNIL] := "KNIL";
-   TokenNames[KOF] := "KOF";
-   TokenNames[KOR] := "KOR";
-   TokenNames[KPOINTER] := "KPOINTER";
-   TokenNames[KPROCEDURE] := "KPROCEDURE";
-   TokenNames[KRECORD] := "KRECORD";
-   TokenNames[KREPEAT] := "KREPEAT";
-   TokenNames[KRETURN] := "KRETURN";
-   TokenNames[KTHEN] := "KTHEN";
-   TokenNames[KTO] := "KTO";
-   TokenNames[KTRUE] := "KTRUE";
-   TokenNames[KTYPE] := "KTYPE";
-   TokenNames[KUNTIL] := "KUNTIL";
-   TokenNames[KVAR] := "KVAR";
-   TokenNames[KWHILE] := "KWHILE";
+   TokenNames[PLUS] := "PLUS";TokenReps[PLUS] := "+";
+   TokenNames[MINUS] := "MINUS";TokenReps[MINUS] := "-";
+   TokenNames[ASTERISK] := "ASTERISK";TokenReps[ASTERISK] := "*";
+   TokenNames[FSLASH] := "FSLASH";TokenReps[FSLASH] := "/";
+   TokenNames[TILDE] := "TILDE";TokenReps[TILDE] := "~";
+   TokenNames[AMPERSAND] := "AMPERSAND";TokenReps[AMPERSAND] := "&";
+   TokenNames[DOT] := "DOT";TokenReps[DOT] := ".";
+   TokenNames[COMMA] := "COMMA";TokenReps[COMMA] := ",";
+   TokenNames[SEMI] := "SEMI";TokenReps[SEMI] := ";";
+   TokenNames[BAR] := "BAR";TokenReps[BAR] := "|";
+   TokenNames[LPAREN] := "LPAREN";TokenReps[LPAREN] := "(";
+   TokenNames[LBRACKET] := "LBRACKET";TokenReps[LBRACKET] := "[";
+   TokenNames[LBRACE] := "LBRACE";TokenReps[LBRACE] := "{";
+   TokenNames[COLEQ] := "COLEQ";TokenReps[COLEQ] := ":=";
+   TokenNames[CARET] := "CARET";TokenReps[CARET] := "^";
+   TokenNames[EQ] := "EQ";TokenReps[EQ] := "=";
+   TokenNames[OCTOTHORPE] := "OCTOTHORPE";TokenReps[OCTOTHORPE] := "#";
+   TokenNames[LT] := "LT";TokenReps[LT] := "<";
+   TokenNames[GT] := "GT";TokenReps[GT] := ">";
+   TokenNames[LTE] := "LTE";TokenReps[LTE] := "<=";
+   TokenNames[GTE] := "GTE";TokenReps[GTE] := ">=";
+   TokenNames[DOTDOT] := "DOTDOT";TokenReps[DOTDOT] := "..";
+   TokenNames[COLON] := "COLON";TokenReps[COLON] := ":";
+   TokenNames[RPAREN] := "RPAREN";TokenReps[RPAREN] := ")";
+   TokenNames[RBRACKET] := "RBRACKET";TokenReps[RBRACKET] := "]";
+   TokenNames[RBRACE] := "RBRACE";TokenReps[RBRACE] := "}";
+   TokenNames[KARRAY] := "KARRAY";TokenReps[KARRAY] := "ARRAY";
+   TokenNames[KBEGIN] := "KBEGIN";TokenReps[KBEGIN] := "BEGIN";
+   TokenNames[KEND] := "KEND";TokenReps[KEND] := "END";
+   TokenNames[KBY] := "KBY";TokenReps[KBY] := "BY";
+   TokenNames[KCASE] := "KCASE";TokenReps[KCASE] := "CASE";
+   TokenNames[KCONST] := "KCONST";TokenReps[KCONST] := "CONST";
+   TokenNames[KDIV] := "KDIV";TokenReps[KDIV] := "DIV";
+   TokenNames[KDO] := "KDO";TokenReps[KDO] := "DO";
+   TokenNames[KELSE] := "KELSE";TokenReps[KELSE] := "ELSE";
+   TokenNames[KELSIF] := "KELSIF";TokenReps[KELSIF] := "ELSIF";
+   TokenNames[KFALSE] := "KFALSE";TokenReps[KFALSE] := "FALSE";
+   TokenNames[KFOR] := "KFOR";TokenReps[KFOR] := "FOR";
+   TokenNames[KIF] := "KIF";TokenReps[KIF] := "IF";
+   TokenNames[KIMPORT] := "KIMPORT";TokenReps[KIMPORT] := "IMPORT";
+   TokenNames[KIN] := "KIN";TokenReps[KIN] := "IN";
+   TokenNames[KIS] := "KIS";TokenReps[KIS] := "IS";
+   TokenNames[KMOD] := "KMOD";TokenReps[KMOD] := "MOD";
+   TokenNames[KMODULE] := "KMODULE";TokenReps[KMODULE] := "MODULE";
+   TokenNames[KNIL] := "KNIL";TokenReps[KNIL] := "NIL";
+   TokenNames[KOF] := "KOF";TokenReps[KOF] := "OF";
+   TokenNames[KOR] := "KOR";TokenReps[KOR] := "OR";
+   TokenNames[KPOINTER] := "KPOINTER";TokenReps[KPOINTER] := "POINTER";
+   TokenNames[KPROCEDURE] := "KPROCEDURE";TokenReps[KPROCEDURE] := "PROCEDURE";
+   TokenNames[KRECORD] := "KRECORD";TokenReps[KRECORD] := "RECORD";
+   TokenNames[KREPEAT] := "KREPEAT";TokenReps[KREPEAT] := "REPEAT";
+   TokenNames[KRETURN] := "KRETURN";TokenReps[KRETURN] := "RETURN";
+   TokenNames[KTHEN] := "KTHEN";TokenReps[KTHEN] := "THEN";
+   TokenNames[KTO] := "KTO";TokenReps[KTO] := "TO";
+   TokenNames[KTRUE] := "KTRUE";TokenReps[KTRUE] := "TRUE";
+   TokenNames[KTYPE] := "KTYPE";TokenReps[KTYPE] := "TYPE";
+   TokenNames[KUNTIL] := "KUNTIL";TokenReps[KUNTIL] := "UNTIL";
+   TokenNames[KVAR] := "KVAR";TokenReps[KVAR] := "VAR";
+   TokenNames[KWHILE] := "KWHILE";TokenReps[KWHILE] := "WHILE";
    SetupFlags()
    
 END Scanner.

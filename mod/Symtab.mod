@@ -10,6 +10,9 @@ CONST
    (* Primitive type kinds we can evaluate to *)
    KByte*=Ty.KByte; KInteger*=Ty.KInteger; KBoolean*=Ty.KBoolean; 
    KReal*=Ty.KReal; KChar*=Ty.KChar; KSet*=Ty.KSet;
+   KString*=101;  (* Not really a primitive type, ARRAY N OF CHAR, but we 
+                     need to handle it *)
+   KNil*=102;
    KError*=-1;
 
    (* Frame flags *)
@@ -32,18 +35,19 @@ TYPE
       rval*: REAL;
       cval*: CHAR;
       setval*: SET;
-      byval*: BYTE
+      byval*: BYTE;
+      string*: Lex.Token  
    END;
    OptConstVal* = POINTER TO ConstVal;
 
-   (* Association of name and type. Used for types and vars. *)
    TypeSym* = POINTER TO TypeSymDesc;
    Frame* = POINTER TO FrameDesc;
+   Module* = POINTER TO ModuleDesc;
+
    TypeSymDesc* = RECORD
+      (* Association of name and type. Used for types and vars. *)
       kind*: INTEGER;  (* ts* constants *)
       name*: ARRAY MaxNameLen OF CHAR;
-      id*: INTEGER;
-         (* Unique for this typesym in the source file it was defined in *)
       ty*: Ty.Type;
       export*: BOOLEAN;
       val*: OptConstVal;
@@ -68,6 +72,7 @@ TYPE
       a module (TODO) and procedures will have them as well.  *)
    FrameDesc* = RECORD
       (* ff* flags *)
+      owningModule*: Module;
       flags*: SET; 
       types*: TypeSym;
       constants*: TypeSym;
@@ -83,7 +88,6 @@ TYPE
       that this will contain all items for the module 
       being compiled, and just the exported items for 
       imported modules *)
-   Module* = POINTER TO ModuleDesc;
    ModuleDesc* = RECORD
       name*, localAlias*: ARRAY MaxNameLen OF CHAR;
       imports*: Module;
@@ -123,10 +127,11 @@ VAR
                            VAR rv: Ty.Type): Ast.SrcError;
    LoadDecls: PROCEDURE(procDecls: Ast.Branch; rv: Module; frame: Frame; scan: Lex.T);
    FileMagic: ARRAY 5 OF CHAR;
+   RORuntimeFwd: PROCEDURE(): Module;
 
    (* Symtab for builtin functions that are globally available. Should
       only have procedures *)
-   Builtins: Module;
+   Builtins, Runtime: Module;
 
 PROCEDURE Note*(t: Ast.T; ts: TypeSym);
 VAR n: TSAnnotation;
@@ -152,10 +157,16 @@ BEGIN
    RETURN rv
 END Remember;
 
+PROCEDURE BelongsToModule*(ts: TypeSym; mod: ARRAY OF CHAR): BOOLEAN;
+   (* Returns true if ts belongs to the given module *)
+   RETURN (ts.frame # NIL) & Ast.StringEq(mod, ts.frame.owningModule.name)
+END BelongsToModule;
+
 PROCEDURE MkFrame(owner: Module; chainTo: Frame): Frame;
 VAR rv: Frame;
 BEGIN
    NEW(rv);
+   rv.owningModule := owner;
    rv.flags := {};
    rv.types := NIL;
    rv.constants := NIL;
@@ -167,7 +178,7 @@ BEGIN
    RETURN rv
 END MkFrame; 
 
-PROCEDURE MkModule(): Module;
+PROCEDURE MkModule*(): Module;
 VAR rv: Module;
 BEGIN
    NEW(rv);
@@ -181,7 +192,7 @@ BEGIN
    RETURN rv
 END MkModule;
 
-PROCEDURE MkTypeSym(kind: INTEGER): TypeSym;
+PROCEDURE MkTypeSym*(kind: INTEGER): TypeSym;
 VAR rv: TypeSym;
 BEGIN
    NEW(rv);
@@ -191,7 +202,6 @@ BEGIN
    rv.export := FALSE;
    rv.next := NIL;
    rv.frame := NIL;
-   rv.id := 0;
    RETURN rv
 END MkTypeSym; 
 
@@ -239,15 +249,20 @@ END IterAllProcs;
 PROCEDURE FindImport*(cur: Module; name: ARRAY OF CHAR): Module;
 VAR rv, x: Module;
 BEGIN
-   x := cur.imports;
-   rv := NIL;
-   WHILE (rv = NIL) & (x # NIL) DO
-      IF Ast.StringEq(name, x.localAlias) THEN
-         rv := x
-      ELSE
-         x := x.importNext
+   IF Ast.StringEq(cur.name, name) THEN
+      (* Fully qualified reference to the current module *)
+      rv := cur
+   ELSE
+      x := cur.imports;
+      rv := NIL;
+      WHILE (rv = NIL) & (x # NIL) DO
+         IF Ast.StringEq(name, x.localAlias) THEN
+            rv := x
+         ELSE
+            x := x.importNext
+         END
       END
-   END
+   END;
    RETURN rv
 END FindImport;
 
@@ -300,6 +315,23 @@ BEGIN
    END;
    RETURN rv
 END LookupConst;
+
+PROCEDURE TypeOf*(cv: ConstVal): Ty.Type;
+   (* Returns the type of the given ConstVal *)
+VAR rv: Ty.Type;
+BEGIN
+   IF cv.kind = KString THEN
+      rv := Ty.TypeForTerminal(cv.string)
+   ELSIF cv.kind = KNil THEN
+      (* This is only produced for NIL constants, so 
+         we can live with the loose type.  Also, a memory
+         leak without GC *)
+      rv := Ty.MkPointerTo(Ty.PrimitiveType(Ty.KAny))
+   ELSE
+      rv := Ty.PrimitiveType(cv.kind)
+   END;
+   RETURN rv
+END TypeOf;
 
 (* If n is not qualified, searches for the proc just in the given frame *)
 PROCEDURE FindProcThisFrame*(m: Module; frame: Frame; n: Ty.QualName): TypeSym; 
@@ -400,8 +432,10 @@ PROCEDURE EvalTerminal*(cur: Module; scan: Lex.T; t: Ast.Terminal;
                        VAR dest: ConstVal): Ast.SrcError;
 VAR rv: Ast.SrcError;
     buf: ARRAY 64 OF CHAR;
+    tyn: Ty.TypeNote;
 BEGIN
    rv := NIL;
+   tyn := Ty.Remember(t);
    IF (t.tok.kind = Lex.ConstInt) OR (t.tok.kind = Lex.ConstHex) THEN
       Lex.Extract(scan, t.tok, buf);
       Cvt.StringToInt(buf, dest.ival, dest.bval);
@@ -410,10 +444,17 @@ BEGIN
       ELSE
          rv := Ast.MkSrcError("Could not parse int literal", scan, t)
       END
-   ELSIF (t.tok.kind = Lex.ConstString) & (t.tok.len = 3) THEN
-      (* Single char strings are treated as character literals *)
-      dest.cval := scan.buf[t.tok.start+1];
-      dest.kind := KChar;
+   ELSIF t.tok.kind = Lex.KNIL THEN
+      dest.kind := KNil
+   ELSIF t.tok.kind = Lex.ConstString THEN
+      IF (tyn # NIL) & (tyn.ty.kind = Ty.KChar) THEN
+         dest.kind := KChar;
+         Lex.Extract(scan, t.tok, buf);
+         dest.cval := buf[1]
+      ELSE
+         dest.kind := KString;
+         dest.string := t.tok;
+      END;
    ELSIF t.tok.kind = Lex.ConstHexString THEN
       (* A character constant in hex. *) 
       Lex.Extract(scan, t.tok, buf);
@@ -651,9 +692,6 @@ BEGIN
       err := CvtStrucType(mod, frame, Ast.BranchAt(formalType, 0), 
                           scan, paramTy);
       IF err = NIL THEN
-         IF Ast.NfVar IN fpsec.flags THEN
-            INCL(paramTy.flags, Ty.Var)
-         END;
          (* For each level of openarray nesting, add an outer array
             type that is marked as an open array. Propagate flags
             up from the inner type. *)
@@ -667,6 +705,7 @@ BEGIN
          END;
          FOR j := 0 TO fpsec.childLen-2 DO
             fld := Ty.MkProcParam();
+            fld.isVar := Ast.NfVar IN fpsec.flags;
             name := Ast.TermAt(fpsec, j);
             fld.seekpos := name.tok.start;
             Lex.Extract(scan, name.tok, fld.name);
@@ -715,7 +754,6 @@ BEGIN
    param := proc.params;
    WHILE param # NIL DO
       ts := MkTypeSym(tsProcParam);
-      ts.id := param.seekpos;
       Strings.Append(param.name, ts.name);
       ts.ty := param.ty;
       ts.next := rv.vars;
@@ -778,7 +816,8 @@ BEGIN
             err := NIL;
          END
    ELSE
-      IF (pt.ty.kind = Ty.KRecord) OR (pt.ty.kind = Ty.KAny) THEN
+      IF (pt.ty.kind = Ty.KRecord) OR (pt.ty.kind = Ty.KAny) 
+            OR (pt.ty.kind = Ty.KPointer) THEN
          rv := pt
       ELSE
          err := Ast.MkSrcError("Pointer only point to records", scan, br)
@@ -903,7 +942,6 @@ BEGIN
       FOR i := 0 TO identList.childLen-1 DO
          fv := MkTypeSym(tsVar);
          name := Ast.TermAt(identList, i);
-         fv.id := name.tok.start;
          Lex.Extract(scan, name.tok, fv.name);
          fv.export := name.export;
          fv.ty := vtype;
@@ -945,7 +983,6 @@ BEGIN
          ASSERT(br.kind = Ast.BkConstDeclaration);
          id := Ast.TermAt(br, 0);
          Lex.Extract(scan, id.tok, cd.name);
-         cd.id := id.tok.start;
          cd.export := id.export;
          err := EvalConstExpr(rv, frame, scan, Ast.GetChild(br, 1), cd.val^);
          IF err # NIL THEN
@@ -973,7 +1010,6 @@ BEGIN
          procDecl := Ast.BranchAt(procDecls, i);
          ent := MkTypeSym(tsProc);
          fname := Ast.TermAt(procDecl, Ast.ProcedureDeclName);
-         ent.id := fname.tok.start;
          Lex.Extract(scan, fname.tok, ent.name);
          ent.export := fname.export;
          (* proc decls get their own frame for their child declarations *) 
@@ -1029,6 +1065,36 @@ BEGIN
    ty.srcName.name[0] := 0X
 END MkSrcName;
 
+PROCEDURE IsImplModule*(name: ARRAY OF CHAR): BOOLEAN;
+   (* Is an implementation module.  We have to treat these
+      differently for some stages of processing *)
+   RETURN Ast.StringEq(name, "SYSTEM") 
+          OR Ast.StringEq(name, "Globals")
+          OR Ast.StringEq(name, "RUNTIME")
+END IsImplModule;
+
+PROCEDURE AddVTableTypeSym(mod: Module; frame: Frame; recTs: TypeSym);
+   (* Creates synthetic module var for the vtable of the given record.
+      Created with a name that can be looked up but not referenced in 
+      source code. *)
+VAR vts, vtab: TypeSym;
+    qn: Ty.QualName;
+    rt: Module;
+BEGIN
+   vts := MkTypeSym(tsVar);
+   vts.name := recTs.name;
+   Strings.Append("_VT", vts.name);
+   vts.export := TRUE;
+   qn.module := "";
+   qn.name := "VTABLE";
+   rt := RORuntimeFwd();
+   vtab := FindType(rt, rt.frame, qn);
+   ASSERT(vtab # NIL);
+   vts.ty := vtab.ty;
+   vts.next := frame.vars;
+   frame.vars := vts;
+END AddVTableTypeSym;
+
 (* Loads all of the types from "types" into "frame" *)
 PROCEDURE LoadTypes(types: Ast.Branch; mod: Module; frame: Frame; scan: Lex.T);
 VAR br: Ast.Branch;
@@ -1049,13 +1115,15 @@ BEGIN
          IF err = NIL THEN
             t := Ast.TermAt(br, Ast.TypeDeclName);
             Lex.Extract(scan, t.tok, ty.name);
-            ty.id := t.tok.start;
             ty.export := t.export;
             MkSrcName(ty.ty);
             Strings.Append(mod.name, ty.ty.srcName.module);
             Strings.Append(ty.name, ty.ty.srcName.name);
             ty.next := frame.types;
-            frame.types := ty
+            frame.types := ty;
+            IF ~IsImplModule(mod.name) & (ty.ty.kind = Ty.KRecord) THEN
+               AddVTableTypeSym(mod, frame, ty)
+            END
          ELSE
             AddErr(mod, err)
          END
@@ -1111,7 +1179,6 @@ BEGIN
          BinWriter.Bool(w, TRUE);
          BinWriter.I8(w, ts.kind);
          BinWriter.String(w, ts.name);
-         BinWriter.I32(w, ts.id);
          Ty.Write(w, ss, ts.ty);
          IF BinWriter.Cond(w, ts.val # NIL) THEN
             WriteConstVal(w, ts.val^)
@@ -1123,15 +1190,15 @@ BEGIN
    BinWriter.Bool(w, FALSE)
 END WriteTypeSyms;
 
-PROCEDURE ReadTypeSyms(VAR w: BinReader.T; VAR ss: Ty.SerialState): TypeSym;
+PROCEDURE ReadTypeSyms(VAR w: BinReader.T; fr: Frame; VAR ss: Ty.SerialState): TypeSym;
 VAR rv, ts: TypeSym;
 BEGIN
    rv := NIL;
    WHILE BinReader.Cond(w) DO
       ts := MkTypeSym(0);
+      ts.frame := fr;
       BinReader.I8(w, ts.kind);
       BinReader.String(w, ts.name);
-      BinReader.I32(w, ts.id);
       ts.ty := Ty.Read(w, ss);
       IF BinReader.Cond(w) THEN
          NEW(ts.val);
@@ -1163,10 +1230,10 @@ BEGIN
    BinReader.I32(w, flags);
    fr := MkFrame(mod, NIL);
    fr.flags := SYSTEM.VAL(SET, flags);
-   fr.types := ReadTypeSyms(w, ss);
-   fr.constants := ReadTypeSyms(w, ss);
-   fr.vars := ReadTypeSyms(w, ss);
-   fr.procedures := ReadTypeSyms(w, ss);
+   fr.types := ReadTypeSyms(w, fr, ss);
+   fr.constants := ReadTypeSyms(w, fr, ss);
+   fr.vars := ReadTypeSyms(w, fr, ss);
+   fr.procedures := ReadTypeSyms(w, fr, ss);
    RETURN fr
 END ReadFrame;
 
@@ -1298,11 +1365,42 @@ BEGIN
    END
 END LoadImports;
 
+PROCEDURE RORuntime(): Module;
+   (* Returns a copy of the runtime module that should
+      not be modified.  *)
+VAR path: Path.T;
+    rd: BinReader.T;
+BEGIN
+   IF Runtime = NIL THEN
+      ASSERT(Config.FindModPath("RUNTIME", path));
+      ASSERT(BinReader.Init(rd, path.str));
+      Runtime := Read(rd);
+      BinReader.Finish(rd);
+   END;
+   RETURN Runtime
+END RORuntime;
+
+PROCEDURE CloneRuntime(): Module;
+   (* We load the RUNTIME module once, but make shallow 
+      copies of it so it can be linked into multiple modules
+      while still sharing the typesyms.  Don't call this
+      for implementation modules that are or don't use
+      RUNTIME *)
+VAR rv, rt: Module;
+BEGIN
+   rt := RORuntime();
+   rv := MkModule();
+   rv.name := rt.name;
+   rv.localAlias := rt.name;
+   rv.frame := rt.frame;
+   rv.initBlock := rt.initBlock;
+   RETURN rv
+END CloneRuntime;
 
 (* Create a Module for the AST version of a Module.   Populates the 
    errs/nofErrs fields of the module if there's errors *)
 PROCEDURE BuildModule*(ast: Ast.T; scan: Lex.T): Module;
-VAR rv: Module;
+VAR rv, runtime: Module;
     mod, initBlock: Ast.Branch;
     term: Ast.Terminal;
     initBlockTs: TypeSym;
@@ -1335,13 +1433,19 @@ BEGIN
       initBlockTs.frame := rv.frame;
       rv.initBlock.procedures := initBlockTs
    END;
-
+   IF ~IsImplModule(rv.name) THEN
+      runtime := CloneRuntime();
+      runtime.importNext := rv.imports;
+      rv.imports := runtime;
+   END;
    RETURN rv   
 END BuildModule;
 
 BEGIN
    CvtStrucType := CvtStrucTypeImpl;
    LoadDecls := LoadDeclsImpl;
+   RORuntimeFwd := RORuntime;
    FileMagic := "SYMT";
    Builtins := NIL;
+   Runtime := NIL;
 END Symtab.

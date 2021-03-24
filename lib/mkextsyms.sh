@@ -37,6 +37,11 @@ mkSym() {
    fi
 }
 
+# Temporary: just making a symbol file for RUNTIME so its types
+# are visible.  This will change to a Compile once that can 
+# actually complete.
+mkSym RUNTIME.mod
+
 # Build symbols for libraries from obnc we use first.
 mkSym $OBNCSRC/Files.obn $OBNCSRC/In.obn $OBNCSRC/Input0.obn
 mkSym $OBNCSRC/Input.obn $OBNCSRC/Out.obn $OBNCSRC/Strings.obn

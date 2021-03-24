@@ -5,6 +5,10 @@ IMPORT
 CONST
    BranchChunkSz = 8;
 
+   (* Abort codes for ESAD *)
+   esadFailedGuard*=16; esadUnmatchedCase*=17;
+
+
    (* Branch kinds, for display, and discrimination.  We
       don't need to specialize records on the Branch type
       since we have NodeOps as a vtable anyway. (And Oberon07
@@ -26,6 +30,7 @@ CONST
 
    (* Flags that can be set on any node *)
    NfVar*=1; (* Is a VAR param *)
+   NfRecord*=2;  (* Case statement is a record case *)
 
    (* Indices for well known child locations for branches *)
    ModuleName* = 0; ModuleImports* = 1; ModuleDecls* = 2; ModuleInit* = 3;
@@ -856,6 +861,11 @@ BEGIN
    ci.labIx := 0;
    RETURN rv
 END NextCase;
+
+PROCEDURE CurLabelList*(ci: CaseIterator): Branch;
+   (* Returns the label list for the last case returned by NextCase() *)
+   RETURN ci.lablist
+END CurLabelList;
 
 PROCEDURE NextLabelRange*(VAR ci: CaseIterator): Branch;
 VAR rv: Branch;

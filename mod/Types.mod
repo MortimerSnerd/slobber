@@ -21,7 +21,7 @@ CONST
   
 
    (* type flags *)
-   Export*=0;Var*=1;OpenArray*=2;Builtin*=3;FromLiteral*=4;
+   Export*=0;OpenArray*=2;Builtin*=3;FromLiteral*=4;
    Visited=5;
    Synthetic*=6;  (* Generated, do not save out to a file *)
 
@@ -94,6 +94,11 @@ TYPE
       name*: ARRAY MaxNameLen OF CHAR;  
       seekpos*: INTEGER;
          (* seek position of the proc name in the source *)
+      ord*: INTEGER;
+         (* Position of the argument.  Set during semcheck
+            rather than parsing, as semcheck determines where
+            hidden parameters go *)
+      isVar*: BOOLEAN;
       ty*: Type;
       next*: ProcParam
    END;
@@ -151,7 +156,7 @@ VAR
 
    (* singleton types we can return from type checking functions *)
    VoidType*, ErrorType*, ArrayChar2, BooleanType*, 
-   CharLiteralType*, NilType*: Type;
+   NilType*: Type;
 
 PROCEDURE Note*(t: Ast.T; ty: Type); 
 VAR n: TypeNote;
@@ -187,6 +192,7 @@ BEGIN
    rv.ty := NIL;
    rv.next := NIL;
    rv.seekpos := 0;
+   rv.isVar := FALSE;
    RETURN rv
 END MkProcParam; 
 
@@ -202,6 +208,17 @@ BEGIN
    rv.body := NIL;
    RETURN rv
 END MkProcType;
+
+PROCEDURE FindParam*(pt: ProcType; name: ARRAY OF CHAR): ProcParam;
+   (* Finds parameter with the given name, or NIL if not found *)
+VAR rv: ProcParam;
+BEGIN
+   rv := pt.params;
+   WHILE (rv # NIL) & ~Ast.StringEq(name, rv.name) DO
+      rv := rv.next
+   END;
+   RETURN rv
+END FindParam;
 
 PROCEDURE MkDeferredTarget*(): DeferredTarget;
 VAR rv: DeferredTarget;
@@ -250,6 +267,14 @@ BEGIN
    rv.ty := NIL
    RETURN rv
 END MkPointerType;
+
+PROCEDURE MkPointerTo*(pointee: Type): PointerType;
+VAR rv: PointerType;
+BEGIN
+   rv := MkPointerType();
+   rv.ty := pointee;
+   RETURN rv
+END MkPointerTo;
 
 PROCEDURE MkArrayType*(): ArrayType;
 VAR rv: ArrayType;
@@ -352,18 +377,15 @@ BEGIN
    ELSIF tok.kind = Lex.ConstReal THEN
       rv := PrimTyInstances[KReal]
    ELSIF tok.kind = Lex.ConstHexString THEN
-      rv := CharLiteralType
+      rv := PrimTyInstances[KChar]
    ELSIF tok.kind = Lex.ConstString THEN
-       IF tok.len = 3 THEN
-          rv := CharLiteralType
-       ELSE
-         (* TODO - this is a memory leak.  We should keep up  
-            with these somewhere so they can be freed *)
-          arty := MkArrayType();
-          arty.dim := tok.len - 2 + 1; (* +1 for null, -2 to ignore quotes *)
-          arty.ty := PrimTyInstances[KChar];
-          rv := arty
-       END
+      (* TODO - this is a memory leak.  We should keep up  
+         with these somewhere so they can be freed *)
+       arty := MkArrayType();
+       arty.dim := tok.len - 2 + 1; (* +1 for null, -2 to ignore quotes *)
+       arty.ty := PrimTyInstances[KChar];
+       INCL(arty.flags, FromLiteral);
+       rv := arty
    ELSIF tok.kind = Lex.KNIL THEN
       rv := NilType
    ELSIF (tok.kind = Lex.KTRUE) OR (tok.kind = Lex.KFALSE) THEN
@@ -482,6 +504,7 @@ BEGIN
       |KSet: Dbg.S("SET")
       |KPrimName: Dbg.S("PRIMTYNAME")
       |KVoid: Dbg.S("VOID")
+      |KAny: Dbg.S("ANY")
       |KArray:
          art := t(ArrayType);
          Dbg.S("ARRAY ");
@@ -589,9 +612,6 @@ BEGIN
       pfld := proc.params;
       WHILE pfld # NIL DO
          Dbg.Ln;Dbg.Ind(indent+1);
-         IF Var IN pfld.ty.flags THEN
-            Dbg.S("VAR ")
-         END;
          Dbg.S(pfld.name);
          Dbg.S(":"); Dbg.Ln;
          DbgPrint(pfld.ty, indent+2);
@@ -609,13 +629,22 @@ BEGIN
    RETURN ty
 END DerefPointers; 
 
-(* Handles the fun case where we thought a single 
-   char string literal was a character, but it was really 
-   a string *)
-PROCEDURE CharLiteralStringMatch(c, s: Type): BOOLEAN;
-   RETURN (c.kind = KChar) & (FromLiteral IN c.flags) & 
-          (s.kind = KArray) & (s(ArrayType).ty.kind = KChar)
-END CharLiteralStringMatch;
+PROCEDURE MatchStringLiteralChar*(c, s: Type): BOOLEAN;
+   (* Type equality for the case where c is a char, 
+      and s is an array that might be a single item 
+      char literal *)
+VAR rv: BOOLEAN;
+    art: ArrayType;
+BEGIN
+   IF (c.kind = KChar) & (s.kind = KArray) & 
+          (FromLiteral IN s.flags) THEN
+      art := s(ArrayType);
+      rv := (art.ty.kind = KChar) & (art.dim = 2)
+   ELSE
+      rv := FALSE
+   END;
+   RETURN rv
+END MatchStringLiteralChar;
 
 (* Returns TRUE if the two types are equivalent 
    While KTypeError should never really get here, 
@@ -645,8 +674,6 @@ BEGIN
             & QNEqual(a.srcName^, b.srcName^) THEN
       (* Having the same qualified type name is a shortcut for
          equality *)
-      rv := TRUE
-   ELSIF CharLiteralStringMatch(a, b) OR CharLiteralStringMatch(b, a) THEN
       rv := TRUE
    ELSIF a.kind # b.kind THEN
       rv := FALSE
@@ -777,6 +804,10 @@ PROCEDURE IsPrimitive*(ty: Type): BOOLEAN;
           & (ty.kind # KPrimName)
 END IsPrimitive;
 
+PROCEDURE IsPointerToArray*(ty: Type): BOOLEAN;
+   RETURN (ty.kind = KPointer) & (ty(PointerType).ty.kind = KArray)
+END IsPointerToArray; 
+
 (* Prepares a SerialState to Read/Write type information *)
 PROCEDURE InitSerialState*(VAR ss: SerialState);
 BEGIN
@@ -868,6 +899,7 @@ BEGIN
       WHILE BinWriter.Cond(w, pp # NIL) DO
          BinWriter.String(w, pp.name);
          BinWriter.I32(w, pp.seekpos);
+         BinWriter.Bool(w, pp.isVar);
          Write(w, ss, pp.ty);
          pp := pp.next
       END
@@ -942,6 +974,7 @@ BEGIN
          pp := MkProcParam();
          BinReader.String(r, pp.name);
          BinReader.I32(r, pp.seekpos);
+         BinReader.Bool(r, pp.isVar);
          pp.ty := ReadImpl(r, ss);
          pp.next := pty.params;
          pty.params := pp
@@ -1085,8 +1118,6 @@ BEGIN
    arty.ty := PrimTyInstances[KChar];
    ArrayChar2 := arty;
    BooleanType := PrimTyInstances[KBoolean];
-   CharLiteralType := MkPrim(KChar);
-   CharLiteralType.flags := {FromLiteral};
    pty := MkPointerType();
    pty.ty := MkPrim(KAny);
    NilType := pty;

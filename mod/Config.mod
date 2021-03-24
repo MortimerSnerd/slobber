@@ -138,7 +138,7 @@ BEGIN
       Path.Zero(cfg.modPaths[i])
    END;
    (* Base sys config dirs from exe location.  exeloc/../lib *)
-   cfg.numSrcPaths := 1;
+   cfg.numSrcPaths := 2;
    cfg.numModPaths := 2;
    GetExePath(cfg.sysPath);
    Path.Drop(cfg.sysPath); Path.Drop(cfg.sysPath);
@@ -153,6 +153,7 @@ BEGIN
       symbol file for, but no source.  So the sourceless library
       modules for OBNC *)
    Path.Copy(cfg.sysPath, cfg.modPaths[1]);
+   Path.Copy(cfg.sysPath, cfg.srcPaths[1]);
 END Init;
 
 BEGIN

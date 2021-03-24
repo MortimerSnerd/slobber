@@ -1,4 +1,4 @@
-(* Calculates dependencies for compiling *)
+
 MODULE Deps;
 IMPORT
    Ast, BinReader, Config, Cvt:=extConvert, Dbg, Files, 
@@ -10,6 +10,7 @@ CONST
 
    (* flags for ModList.flags *)
    MLNeedsBuild=0;MLProcessed=1;MLNoSource=2;MLRoot=3;
+   MLVisit=4;
 
 TYPE
    ModList = POINTER TO ModListDesc;
@@ -113,6 +114,7 @@ BEGIN
       mod := St.Read(rd);
       BinReader.Finish(rd);
       ml := InternMod(ds, mod.name);
+      ml.src := modPath;
       INCL(ml.flags, MLNoSource);
       import := mod.imports;
       rv := TRUE;
@@ -159,7 +161,7 @@ PROCEDURE AddDeps*(VAR ds: DepState; scan: Lex.T; ast: Ast.Branch;
       builds a transitive import graph.  No checks
       on file dates is done yet. Prereq: InitDepState.
       Returns FALSE if there was an error. *)
-VAR ml, dml: ModList;
+VAR ml, dml, rt: ModList;
     buf: ARRAY 64 OF CHAR;
     nt: Ast.Terminal;
     imports, import: Ast.Branch;
@@ -172,6 +174,11 @@ BEGIN
    Path.FromZ(ml.src, fileName);
 
    IF ~(MLProcessed IN ml.flags) THEN
+      IF ~St.IsImplModule(buf) THEN
+         (* Implicit dependency on RUNTIME for non-impl modules *)
+         rt := InternMod(ds, "RUNTIME");
+         AddDep(ds, ml.id, rt.id)
+      END;
       INCL(ml.flags, MLProcessed);
       imports := Ast.BranchAt(ast, Ast.ModuleImports);
       IF imports # NIL THEN
@@ -252,12 +259,34 @@ BEGIN
    RETURN rv
 END SrcNewerThanSyms;
 
+PROCEDURE StartDepWalkImpl(ds: DepState);
+VAR ml: ModList;
+BEGIN
+   ml := ds.mods;
+   WHILE ml # NIL DO
+      EXCL(ml.flags, MLVisit);
+      ml := ml.next
+   END
+END StartDepWalkImpl;
+
+PROCEDURE StartDepWalk*(ds: DepState);
+   (* Sets up to walk all of the dependencies, 
+      regardless of whether they are dirty or not.
+      Should be called once before a series of
+      NextDep calls.  This can not be intertwined
+      with calls to Check() or NextDirtyFile *)
+BEGIN
+   StartDepWalkImpl(ds);
+   IF CheckNeedsBuild(ds, Root(ds)) THEN END;
+END StartDepWalk;
+
 PROCEDURE Check*(VAR ds: DepState): BOOLEAN; 
    (* Marks modules that need to be rebuilt, by 
       checking for changes, and propagating the
       NeedsBuild flag down back towards the root *)
 VAR ml: ModList;
 BEGIN
+   StartDepWalkImpl(ds);
    ml := ds.mods;
    WHILE ml # NIL DO
       IF ~(MLNoSource IN ml.flags) & ~(MLNeedsBuild IN ml.flags) THEN
@@ -270,30 +299,51 @@ BEGIN
    RETURN CheckNeedsBuild(ds, Root(ds))
 END Check;
 
-PROCEDURE NextDirtyFile*(ds: DepState; VAR dest: Path.T): BOOLEAN;
-   (* Prereqs: AddDeps, Check.  Returns the next file that should
-      be compiled, or FALSE if there are none left *)
-VAR rv: BOOLEAN;
-    ml, cand: ModList;
+
+PROCEDURE NextDepImpl(ds: DepState; VAR dest: Path.T): ModList;
+   (* Returns the next dependency in a partial ordering where
+      a will be returned before b if b depends on a. *)
+VAR ml, cand: ModList;
     largestDepth: INTEGER;
 BEGIN
    largestDepth := -1;
    ml := ds.mods;
    cand := NIL;
    WHILE ml # NIL DO
-      IF (MLNeedsBuild IN ml.flags) &  (ml.depth > largestDepth) THEN
+      IF ~(MLVisit IN ml.flags) 
+            & (ml.depth > largestDepth) THEN
          largestDepth := ml.depth;
          cand := ml
       END;
       ml := ml.next
    END;
    IF cand # NIL THEN
-      rv := TRUE;
-      EXCL(cand.flags, MLNeedsBuild);
+      INCL(cand.flags, MLVisit);
       Path.Copy(cand.src, dest)
-   ELSE
-      rv := FALSE
-   END
+   END;
+   RETURN cand
+END NextDepImpl;
+
+PROCEDURE NextDep*(ds: DepState; VAR dest: Path.T): BOOLEAN;
+   RETURN NextDepImpl(ds, dest) # NIL
+END NextDep;
+
+PROCEDURE NextDirtyFile*(ds: DepState; VAR dest: Path.T): BOOLEAN;
+   (* Prereqs: AddDeps, Check.  Returns the next file that should
+      be compiled, or FALSE if there are none left *)
+VAR cand: ModList;
+    rv: BOOLEAN;
+BEGIN
+   rv := FALSE;
+   REPEAT
+      cand := NextDepImpl(ds, dest);
+      IF (cand # NIL) & (MLNeedsBuild IN cand.flags) 
+            & ~(MLNoSource IN cand.flags) THEN
+         rv := TRUE;
+         EXCL(cand.flags, MLNeedsBuild);
+      END
+   UNTIL rv OR (cand = NIL);
+
    RETURN rv
 END NextDirtyFile;
 

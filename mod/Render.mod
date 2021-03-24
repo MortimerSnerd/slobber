@@ -458,12 +458,14 @@ BEGIN
             |Ast.BkCall:
                WriteTreeImpl(C(b, 0));
                any0 := C(b, 1);
-               x := any0(Ast.Branch);
-               OS("(");
-               IF x.childLen > 0 THEN
-                  WriteTreeImpl(any0)
-               END;
-               OS(")")
+               IF any0 # NIL THEN
+                  x := any0(Ast.Branch);
+                  OS("(");
+                  IF x.childLen > 0 THEN
+                     WriteTreeImpl(any0)
+                  END;
+                  OS(")")
+               END
 
             |Ast.BkSet:
                OS("{");

@@ -1,7 +1,7 @@
 (* Semantic checking and desugaring passes for the AST *)
 MODULE Semcheck;
 IMPORT
-   Ast, Symtab, Lex := Scanner, Ty:=Types;
+   Ast, Rewrite, Lex := Scanner, Symtab, Ty:=Types;
 
 TYPE
    State* = RECORD
@@ -223,6 +223,26 @@ BEGIN
    RETURN rv
 END IsSystemValCall;
 
+PROCEDURE TypeEqualCoerce(a: Ast.T; aty: Ty.Type; 
+                          b: Ast.T; bty: Ty.Type): BOOLEAN;
+   (* Tests for type equality, coercing string literals to 
+      characters where they would match *)
+VAR rv: BOOLEAN;
+BEGIN
+   IF Ty.Equal(aty, bty) THEN
+      rv := TRUE
+   ELSIF (b # NIL) & Ty.MatchStringLiteralChar(aty, bty) THEN
+      Ty.Note(b, Ty.PrimitiveType(Ty.KChar));
+      rv := TRUE
+   ELSIF (a # NIL) & Ty.MatchStringLiteralChar(bty, aty) THEN
+      Ty.Note(a, Ty.PrimitiveType(Ty.KChar));
+      rv := TRUE
+   ELSE
+      rv := FALSE
+   END;
+   RETURN rv
+END TypeEqualCoerce;
+
 (* Returns the type for an expression.  If the ast reprensents something
    typeless, like an IF statement, returns a KVoid type.  If there's
    an error in the typing (like a binop with different types of arguments), 
@@ -235,7 +255,7 @@ VAR rv, lhs, rhs: Ty.Type;
     term: Ast.Terminal;
     br, calldesig: Ast.Branch;
     procTy: Ty.ProcType;
-    param: Ast.T;
+    param, lbranch, rbranch: Ast.T;
     note: Ty.TypeNote;
 BEGIN
    rv := Ty.VoidType;
@@ -267,11 +287,13 @@ BEGIN
                will do that just once *)
             rv := Ty.PrimitiveType(Ty.KBoolean)
          ELSE
-            lhs := ExpressionType(mod, scope, Ast.GetChild(br, 0), scan, err);
+            lbranch := Ast.GetChild(br, 0);
+            lhs := ExpressionType(mod, scope, lbranch, scan, err);
             IF err = NIL THEN
-               rhs := ExpressionType(mod, scope, Ast.GetChild(br, 2), scan, err);
+               rbranch := Ast.GetChild(br, 2);
+               rhs := ExpressionType(mod, scope, rbranch, scan, err);
                IF err = NIL THEN
-                  IF Ty.Equal(lhs, rhs) THEN
+                  IF TypeEqualCoerce(lbranch, lhs, rbranch, rhs) THEN
                      IF IsCompare(term.tok.kind) THEN
                         rv := Ty.BooleanType
                      ELSE
@@ -312,6 +334,7 @@ BEGIN
                      err := Ast.MkSrcError(
                         "Expecting primitive type name", scan, param)
                   END;
+                  Ty.Note(param, rv);
                   IF err = NIL THEN
                      param := NthCallParam(br, 1);
                      IF param = NIL THEN
@@ -476,7 +499,7 @@ END Pass0Proc;
 
 (* Desugaring and AST fixup pass that uses type information to
    disambiguate parts of the parse tree that are wrong *)   
-PROCEDURE RunPass0*(st: State): BOOLEAN;
+PROCEDURE RunPass0*(VAR st: State): BOOLEAN;
 VAR it: Symtab.TSIter;
     proc: Symtab.TypeSym;
 BEGIN
@@ -536,10 +559,13 @@ BEGIN
                IF err # NIL THEN
                   Symtab.AddErr(st.mod, err)
                END;
-               IF ~Ty.Equal(expTy, param.ty) 
+               IF ~TypeEqualCoerce(paramExp, expTy, NIL, param.ty) 
                      & ~Ty.IsSubtype(expTy, param.ty) THEN
                   AddErr(st, "Mismatched proc parameter type.", paramExp)
                END;
+               IF Ty.Remember(paramExp) = NIL THEN
+                  Ty.Note(paramExp, expTy)
+               END
             END;
             param := param.next;
             INC(i)
@@ -673,6 +699,7 @@ BEGIN
    WHILE Ast.HasAnotherCase(iter) DO
       case := Ast.NextCase(iter);
       body := Ast.BranchAt(case, Ast.CaseStmtSeq);
+      Pass1StmtSeq(st, proc, body);
       WHILE Ast.HasAnotherLabelRange(iter) DO
          labelRange := Ast.NextLabelRange(iter);
          lab := Ast.GetChild(labelRange, 0);
@@ -750,15 +777,17 @@ END CheckRecordCases;
 (* The parser ensures the case label are integers, strings or qualidents, 
    so we just need to sanity check the usage *) 
 PROCEDURE CheckCaseStmt(st: State; proc: Symtab.TypeSym; stmt: Ast.Branch);
-VAR expr: Ast.Branch;
+VAR expr: Ast.T;
     err: Ast.SrcError;
     ety: Ty.Type;
 BEGIN
-   expr := Ast.BranchAt(stmt, Ast.CaseStmtExpr);
+   expr := Ast.GetChild(stmt, Ast.CaseStmtExpr);
    CheckExpression(st, proc, expr);
    ety := ExpressionType(st.mod, proc.frame, expr, st.scan, err);
    IF err = NIL THEN
+      Ty.Note(expr, ety);
       IF Ty.IsRecord(ety) OR Ty.IsRecordRef(ety) THEN
+         INCL(stmt.flags, Ast.NfRecord);
          CheckRecordCases(st, proc, stmt)
       ELSIF Ty.IsInteger(ety) OR Ty.IsCharLiteral(ety) THEN
          CheckCases(st, proc, stmt)
@@ -881,6 +910,7 @@ VAR i: INTEGER;
     note: Ty.TypeNote;
     ignore: Ty.Type;
     err: Ast.SrcError;
+    pp: Ty.ProcParam;
 BEGIN
    (* Find out var identifier the designator starts out with 
       is writable. This can influence whether the result of
@@ -897,7 +927,11 @@ BEGIN
             types are assumed passed as pointers rather than copied,
             so no writes are allowed.  By value parameters and VAR
             parameters are fine to write to.i *)
-         rv := ~Ty.IsStructured(varInf.ty) OR (Ty.Var IN varInf.ty.flags)
+         rv := ~Ty.IsStructured(varInf.ty);
+         IF ~rv THEN
+            pp := Ty.FindParam(proc.ty(Ty.ProcType), varInf.name);
+            rv := pp.isVar
+         END;
       END;
       (* Walk selectors.  If we do field acces on a pointer, 
          the resulting loc is definitely writable. *)
@@ -988,7 +1022,7 @@ BEGIN
          tyr := ExpressionType(st.mod, proc.frame, rhs, st.scan, err);
          IF err = NIL THEN
             Ty.Note(rhs, tyr);
-            IF ~Ty.Equal(tyl, tyr) THEN
+            IF ~TypeEqualCoerce(desig, tyl, rhs, tyr) THEN
                CheckAssignmentValid(st, proc, desig, rhs, tyl, tyr);
             END
          ELSE
@@ -1022,46 +1056,55 @@ PROCEDURE CheckStatement(st: State; proc: Symtab.TypeSym;
 VAR err: Ast.SrcError;
     ty: Ty.Type;
     ncall: Ast.Branch;
+    i: INTEGER;
 BEGIN
-   (* statements should have a void return type *)
-   ty := ExpressionType(st.mod, proc.frame, stmt, st.scan, err);
-   IF err # NIL THEN
-      Symtab.AddErr(st.mod, err)
-      
-   ELSIF ty.kind # Ty.KVoid THEN
-      IF (ty.kind = Ty.KProcedure) & IsParameterlessCall(stmt, ty) THEN
-         (* Ex: Out.Ln; It's parsed as just a designator, 
-            rewrite this to be a call so it will be obvious to 
-            later stages. *)
-         ncall := Ast.MkCall();
-         Ast.AddChild(ncall, stmt);
-         Ast.AddChild(ncall, NIL);
-         Ast.SetChild(parent, stmtIx, ncall)
-      ELSE
-         Symtab.AddErr(st.mod, 
-                       Ast.MkSrcError("Expression value ignored.", st.scan,
-                       stmt)) 
+   IF stmt.kind = Ast.BkStatementSeq THEN
+      FOR i := 0 TO stmt.childLen-1 DO
+         CheckStatement(st, proc, stmt, i, Ast.BranchAt(stmt, i))
       END
    ELSE
-      IF stmt.kind = Ast.BkIfStmt THEN
-         CheckIfStmt(st, proc, stmt)
-      ELSIF stmt.kind = Ast.BkCaseStatement THEN
-         CheckCaseStmt(st, proc, stmt)
-      ELSIF stmt.kind = Ast.BkWhileStatement THEN
-         CheckWhileStmt(st, proc, stmt)
-      ELSIF stmt.kind = Ast.BkRepeatStatement THEN
-         CheckRepeatStmt(st, proc, stmt)
-      ELSIF stmt.kind = Ast.BkForStatement THEN
-         CheckForStmt(st, proc, stmt)
-      ELSIF stmt.kind = Ast.BkBinOp THEN
-         (* := is the only binary op that returns void right now *)
-         CheckAssignment(st, proc, stmt) 
-      ELSIF stmt.kind = Ast.BkCall THEN
-         CheckCallStmt(st, proc, stmt)
+      (* statements should have a void return type *)
+      ty := ExpressionType(st.mod, proc.frame, stmt, st.scan, err);
+      IF err # NIL THEN
+         Symtab.AddErr(st.mod, err)
+      ELSIF ty.kind # Ty.KVoid THEN
+         IF (ty.kind = Ty.KProcedure) & IsParameterlessCall(stmt, ty) THEN
+            (* Ex: Out.Ln; It's parsed as just a designator, 
+               rewrite this to be a call so it will be obvious to 
+               later stages. *)
+            ncall := Ast.MkCall();
+            Ast.AddChild(ncall, stmt);
+            Ast.AddChild(ncall, NIL);
+            Ast.SetChild(parent, stmtIx, ncall)
+         ELSE
+            Symtab.AddErr(st.mod, 
+                          Ast.MkSrcError("Expression value ignored.", st.scan,
+                          stmt)) 
+         END
       ELSE
-         AddErr(st, "What the balls", stmt)
-      END
-   END;
+         IF stmt.kind = Ast.BkIfStmt THEN
+            CheckIfStmt(st, proc, stmt)
+         ELSIF stmt.kind = Ast.BkCaseStatement THEN
+            CheckCaseStmt(st, proc, stmt);
+            Ast.SetChild(parent, stmtIx, 
+                         Rewrite.CaseStmt(st.mod, proc, st.scan, 
+                                          stmt)) 
+         ELSIF stmt.kind = Ast.BkWhileStatement THEN
+            CheckWhileStmt(st, proc, stmt)
+         ELSIF stmt.kind = Ast.BkRepeatStatement THEN
+            CheckRepeatStmt(st, proc, stmt)
+         ELSIF stmt.kind = Ast.BkForStatement THEN
+            CheckForStmt(st, proc, stmt)
+         ELSIF stmt.kind = Ast.BkBinOp THEN
+            (* := is the only binary op that returns void right now *)
+            CheckAssignment(st, proc, stmt) 
+         ELSIF stmt.kind = Ast.BkCall THEN
+            CheckCallStmt(st, proc, stmt)
+         ELSE
+            AddErr(st, "What the balls", stmt)
+         END
+      END;
+   END
 END CheckStatement;
 
 PROCEDURE Pass1StmtSeqImpl(st: State; proc: Symtab.TypeSym; seq: Ast.Branch);
@@ -1084,8 +1127,22 @@ VAR procBody, seq: Ast.Branch;
     ptype: Ty.ProcType;
     err: Ast.SrcError;
     rExpTy: Ty.Type;
+    param: Ty.ProcParam;
+    paramNo: INTEGER;
 BEGIN
    ptype := proc.ty(Ty.ProcType);
+   param := ptype.params;
+   paramNo := 0;
+   WHILE param # NIL DO
+      param.ord := paramNo;
+      IF param.ty.kind = Ty.KArray THEN
+         (* openarray, extra len parameter comes after *)
+         paramNo := paramNo + 2   
+      ELSE
+         INC(paramNo)
+      END;
+      param := param.next
+   END;
    procBody := ptype.body;
    seq := Ast.BranchAt(procBody, Ast.ProcBodyStmts);
    Pass1StmtSeq(st, proc, seq);
@@ -1101,7 +1158,7 @@ BEGIN
          CheckExpression(st, proc, retExpr);
          rExpTy := ExpressionType(st.mod, proc.frame, retExpr, st.scan, err);
          IF err = NIL THEN
-            IF ~Ty.Equal(ptype.returnTy, rExpTy) THEN
+            IF ~TypeEqualCoerce(NIL, ptype.returnTy, retExpr, rExpTy) THEN
                AddErr(st, "Return type does not match return expression type.", 
                       retExpr)
             END
@@ -1134,7 +1191,7 @@ END RunPass1;
 
 (* Runs all semcheck passes.  Returns false if any checks
    failed *)
-PROCEDURE Run*(st: State): BOOLEAN;
+PROCEDURE Run*(VAR st: State): BOOLEAN;
    RETURN RunPass0(st) & RunPass1(st)
 END Run;
 
